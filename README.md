@@ -2,6 +2,9 @@
 
 一个原生 Windows 小软件，把短剧视频按集数顺序批量改成发布用的标准标题。
 
+> **下载**：[Releases 里的 `short-drama-renamer.exe`](https://github.com/crazyzhang277/short-drama-renamer/releases/latest)
+> —— 单文件、免安装、无需运行库，双击即用。
+
 ![界面](shot.png)
 
 ![使用教程窗口](shot-tutorial.png)
