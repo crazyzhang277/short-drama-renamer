@@ -87,7 +87,7 @@ if ($needBoot) {
 }
 
 # ---------------------------------------------------------------- 3. 收集文件
-$skipDir  = @('.git', '.rename-tool', '_demo', '_gap', '_dup', 'node_modules')
+$skipDir  = @('.git', '.rename-tool', '_demo', '_gap', '_dup', 'node_modules', 'dist')
 $skipFile = @('settings.ini', '_page-draft.md', 'Thumbs.db', 'desktop.ini', '.DS_Store')
 
 $files = Get-ChildItem -LiteralPath $Root -Recurse -File | Where-Object {

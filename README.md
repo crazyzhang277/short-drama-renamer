@@ -31,6 +31,8 @@
 - **改动即时预览**（默认开启）：改任何设置（换标签、改序号、换排序、改冒号处理……）
   都会自动刷新下方预览列表，不用反复点「预览」。
 - **使用教程**：软件内自带一份图文说明，随时点开看。
+- **统计总时长**：按当前选中的文件夹（和「包含子文件夹」开关）把所有视频的时长加起来，
+  弹窗给出视频数量、总时长，以及读不到时长的文件清单。详见第五节。
 
 ---
 
@@ -165,6 +167,16 @@ mp4 mkv mov avi wmv flv m4v ts webm mpg mpeg rmvb rm 3gp m2ts vob ogv divx asf f
 
 勾选「包含子文件夹」会递归扫描所有子目录。
 
+### 统计总时长
+
+点「统计总时长」，弹窗会告诉你这个文件夹一共多少个视频、加起来多长：
+
+![统计总时长](shot-duration-dialog.png)
+
+时长用 Windows 自带的 Media Foundation 读（mp4 / mkv / avi / mov / ts / webm / wmv 都没问题）。
+`flv`、`rmvb` 这类系统没有解码器的格式读不到时长，不会算错，只会在弹窗里单独列出来，
+统计结果不受影响。
+
 ---
 
 ## 六、设置记忆
@@ -190,7 +202,7 @@ build.bat
 源码结构：
 
 ```
-src/main.cpp        全部逻辑与界面（约 1900 行，纯 Win32 + GDI，无第三方库）
+src/main.cpp        全部逻辑与界面（约 2100 行，纯 Win32 + GDI + Media Foundation，无第三方库）
 src/app.rc          资源脚本
 src/app.manifest    Common-Controls v6 + DPI 感知 + 系统版本声明
 src/app.ico         图标
@@ -202,7 +214,7 @@ src/app.ico         图标
 
 ## 八、自检
 
-软件内置 41 项自检（集数识别、自然排序、标点转换、端到端改名、撤销、子目录过滤、剧名识别、断档编号）：
+软件内置 44 项自检（集数识别、自然排序、标点转换、端到端改名、撤销、子目录过滤、剧名识别、断档编号、时长格式化）：
 
 ```powershell
 .\短剧更名工具.exe --selftest
@@ -221,6 +233,7 @@ install-toolchain.ps1 安装 C++ 编译环境
 README.md             本文档
 shot.png              界面截图
 shot-tutorial.png     使用教程窗口截图
+shot-duration-dialog.png  统计总时长弹窗截图
 selftest.log          最近一次自检结果
 src\                  源码
 tools\                开发期用的自动化测试脚本（截图 / 布局检查 / 端到端测试）

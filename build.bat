@@ -16,7 +16,7 @@ windres.exe -I src -O coff -o src\app.res src\app.rc
 if errorlevel 1 goto err
 
 echo [2/4] 编译 C++ ...
-g++.exe -std=c++17 -O2 -municode -mwindows -static -static-libgcc -static-libstdc++ -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers src\main.cpp src\app.res -o renamer.exe -lcomctl32 -lole32 -loleaut32 -luuid -lshell32 -lshlwapi -lgdi32 -luser32
+g++.exe -std=c++17 -O2 -municode -mwindows -static -static-libgcc -static-libstdc++ -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers src\main.cpp src\app.res -o renamer.exe -lcomctl32 -lole32 -loleaut32 -luuid -lshell32 -lshlwapi -lgdi32 -luser32 -lmfplat -lmfreadwrite
 if errorlevel 1 goto err
 
 echo [3/4] 设置文件名 ...

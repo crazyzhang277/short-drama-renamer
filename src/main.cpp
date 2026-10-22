@@ -6,6 +6,10 @@
 #include <commctrl.h>
 #include <shlobj.h>
 #include <shobjidl.h>
+#include <propvarutil.h>
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mfreadwrite.h>
 #include <shellapi.h>
 #include <objbase.h>
 #include <string>
@@ -53,6 +57,7 @@ enum {
     IDC_BTN_HELP,
     IDC_HELP_TEXT,
     IDC_HELP_CLOSE,
+    IDC_BTN_DURATION,
 };
 
 static const UINT_PTR IDT_REFRESH = 1;   // 自动刷新的防抖定时器
@@ -62,7 +67,7 @@ static HINSTANCE g_hInst;
 static HWND  g_hMain, g_hFolder, g_hBrowse, g_hList, g_hTitle, g_hStart, g_hPad,
              g_hSort, g_hTag, g_hCustom, g_hColon, g_hPreview, g_hRename,
              g_hUndo, g_hTitles, g_hOpen, g_hSub, g_hStatus, g_hGuess, g_hAuto,
-             g_hHelp, g_hKeepEp;
+             g_hHelp, g_hKeepEp, g_hDuration;
 static HFONT g_fontUI, g_fontTitle, g_fontSub, g_fontBtn;
 static HBRUSH g_brBack;
 static int   g_dpi = 96;
@@ -972,6 +977,81 @@ static bool DoUndo() {
     return true;
 }
 
+// ------------------------------------------------------------------ 统计总时长
+// 时长走系统自带的 Media Foundation，不需要第三方库；系统不认识的格式会读不到
+static bool VideoDurationSec(const fs::path& p, double& sec) {
+    IMFSourceReader* reader = nullptr;
+    if (FAILED(MFCreateSourceReaderFromURL(p.c_str(), nullptr, &reader)) || !reader)
+        return false;
+    bool ok = false;
+    PROPVARIANT v;
+    PropVariantInit(&v);
+    if (SUCCEEDED(reader->GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE,
+                                                   MF_PD_DURATION, &v)) && v.vt == VT_UI8) {
+        sec = (double)v.uhVal.QuadPart / 10000000.0;   // 100ns -> 秒
+        ok = sec > 0;
+    }
+    PropVariantClear(&v);
+    reader->Release();
+    return ok;
+}
+
+static std::wstring FmtDuration(long sec) {
+    long h = sec / 3600, m = (sec % 3600) / 60, s = sec % 60;
+    wchar_t b[64] = {0};
+    if (h > 0)      swprintf(b, 64, L"%ld 小时 %ld 分 %ld 秒", h, m, s);
+    else if (m > 0) swprintf(b, 64, L"%ld 分 %ld 秒", m, s);
+    else            swprintf(b, 64, L"%ld 秒", s);
+    return b;
+}
+
+static void DoCountDuration() {
+    std::wstring folder = Trim(GetText(g_hFolder));
+    std::error_code ec;
+    if (folder.empty() || !fs::is_directory(folder, ec)) {
+        MessageBoxW(g_hMain, L"请先选择视频文件夹。", L"统计总时长", MB_ICONWARNING);
+        return;
+    }
+
+    bool sub = SendMessageW(g_hSub, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    std::vector<fs::path> files;
+    CollectFiles(fs::path(folder), sub, files);
+    if (files.empty()) {
+        MessageBoxW(g_hMain, L"该文件夹里没有找到视频文件。", L"统计总时长", MB_ICONWARNING);
+        return;
+    }
+
+    HCURSOR oldCur = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+    long total = 0;
+    int ok = 0;
+    std::vector<std::wstring> bad;
+    for (size_t i = 0; i < files.size(); ++i) {
+        double sec = 0;
+        if (VideoDurationSec(files[i], sec)) { total += (long)(sec + 0.5); ok++; }
+        else bad.push_back(files[i].filename().wstring());
+        if ((i % 8) == 0) {
+            wchar_t b[256] = {0};
+            swprintf(b, 256, L"统计时长中… %zu / %zu", i + 1, files.size());
+            SetStatus(b);
+        }
+    }
+    SetCursor(oldCur);
+
+    std::wstring msg = L"视频数量：" + std::to_wstring(files.size()) + L" 个\n"
+                     + L"总时长：  " + FmtDuration(total) + L"\n";
+    if (!bad.empty()) {
+        msg += L"\n有 " + std::to_wstring(bad.size()) + L" 个文件读不到时长"
+               L"（系统没有对应的解码器）：\n";
+        for (size_t i = 0; i < bad.size() && i < 8; ++i) msg += L"  " + bad[i] + L"\n";
+        if (bad.size() > 8) msg += L"  ……\n";
+    }
+    if (ok == 0) msg += L"\n一个时长都没读到，这个格式多半不被系统支持。";
+
+    SetStatus(L"共 " + std::to_wstring(files.size()) + L" 个视频，总时长 " + FmtDuration(total)
+              + (bad.empty() ? L"" : L"（" + std::to_wstring(bad.size()) + L" 个读不到时长）"));
+    MessageBoxW(g_hMain, msg.c_str(), L"统计总时长", MB_ICONINFORMATION);
+}
+
 // ------------------------------------------------------------------ 选文件夹
 static bool PickFolder(std::wstring& out) {
     IFileOpenDialog* pDlg = nullptr;
@@ -1144,7 +1224,8 @@ static void Layout(HWND hwnd) {
     MoveWindow(g_hRename,  x, by, bw + S(16), btnH, TRUE);    x += bw + S(16) + gap;
     MoveWindow(g_hUndo,    x, by, bw, btnH, TRUE);            x += bw + gap;
     MoveWindow(g_hTitles,  x, by, bw + S(24), btnH, TRUE);    x += bw + S(24) + gap;
-    MoveWindow(g_hOpen,    x, by, bw, btnH, TRUE);
+    MoveWindow(g_hOpen,    x, by, bw, btnH, TRUE);            x += bw + gap;
+    MoveWindow(g_hDuration,x, by, bw, btnH, TRUE);
 
     MoveWindow(g_hStatus, m, H - S(32), W - m * 2, S(22), TRUE);
     InvalidateRect(hwnd, nullptr, FALSE);
@@ -1238,6 +1319,8 @@ L"    冒号处理：Windows 文件名不允许英文冒号，默认换成全角
 L"        选「短横线 -」或「空格」则换成对应的符号。\r\n"
 L"    自定义标签：只在自己写标签时用，不需要带 # 号。\r\n"
 L"    改动即时预览：勾上后，改任何设置都会自动刷新预览，不用反复点「预览」。\r\n"
+L"    「统计总时长」按钮：按当前的「视频文件夹」和「包含子文件夹」，把里面所有视频的时长加起来。\r\n"
+L"        时长靠系统自带的解码器读，flv、rmvb 这类系统不认识的格式会读不到，弹窗里会单独列出来。\r\n"
 L"\r\n"
 L"四、识别剧名的规则\r\n"
 L"    从文件夹路径最里层往外找，跳过这些没意义的名字：\r\n"
@@ -1262,7 +1345,9 @@ L"    答：不会。只改文件名，内容、位置、大小都不动。\r\n"
 L"    问：文件夹里混了字幕、封面、txt？\r\n"
 L"    答：只处理视频扩展名，其它文件原样不动。\r\n"
 L"    问：支持哪些视频格式？\r\n"
-L"    答：mp4 mkv mov avi wmv flv m4v ts webm mpg mpeg rmvb rm 3gp m2ts vob ogv divx asf f4v。\r\n";
+L"    答：mp4 mkv mov avi wmv flv m4v ts webm mpg mpeg rmvb rm 3gp m2ts vob ogv divx asf f4v。\r\n"
+L"    问：统计总时长里说有几个文件读不到时长？\r\n"
+L"    答：那几个格式系统没有解压器（多是 flv、rmvb），弹窗里已经列出来了，改名不受影响。\r\n";
 
 static HWND g_hTutWnd = nullptr;
 static HWND g_hTutEdit = nullptr;
@@ -1433,6 +1518,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_hOpen = CreateWindowExW(0, L"BUTTON", L"打开文件夹",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             0,0,0,0, hwnd, (HMENU)IDC_BTN_OPEN, g_hInst, nullptr);
+        g_hDuration = CreateWindowExW(0, L"BUTTON", L"统计总时长",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            0,0,0,0, hwnd, (HMENU)IDC_BTN_DURATION, g_hInst, nullptr);
 
         g_hStatus = CreateWindowExW(0, L"STATIC", L"就绪 · 把视频文件夹直接拖进窗口即可",
             WS_CHILD | WS_VISIBLE | SS_LEFT | SS_ENDELLIPSIS,
@@ -1441,7 +1529,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         HWND all[] = { g_hFolder, g_hBrowse, g_hTitle, g_hStart, g_hPad, g_hSub,
                        g_hSort, g_hTag, g_hCustom, g_hColon, g_hList, g_hPreview,
                        g_hRename, g_hUndo, g_hTitles, g_hOpen, g_hGuess, g_hAuto,
-                       g_hKeepEp, g_hHelp };
+                       g_hKeepEp, g_hHelp, g_hDuration };
         for (HWND h : all) SendMessageW(h, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
         SendMessageW(g_hStatus, WM_SETFONT, (WPARAM)g_fontSub, TRUE);
 
@@ -1688,6 +1776,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+        case IDC_BTN_DURATION:
+            DoCountDuration();
+            return 0;
         case IDC_BTN_HELP:
             ShowTutorial(hwnd);
             return 0;
@@ -1932,6 +2023,12 @@ static int RunSelfTest() {
               IsNoiseSegment(L"待更名"),
           L"IsNoiseSegment 识别盘符/系统目录/中文通用目录");
 
+    // ---- 7. 时长格式化
+    LOGW(L"\n[7] 时长格式化\n");
+    CHECK(FmtDuration(3725) == L"1 小时 2 分 5 秒", L"3725 秒 -> " + FmtDuration(3725));
+    CHECK(FmtDuration(90) == L"1 分 30 秒", L"90 秒 -> " + FmtDuration(90));
+    CHECK(FmtDuration(0) == L"0 秒", L"0 秒 -> " + FmtDuration(0));
+
     LOGW(L"\n=== 结果：%ls（失败 %d 项）===\n",
         g_fail == 0 ? L"全部通过" : L"存在失败", g_fail);
 
@@ -1961,6 +2058,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow) {
     if (g_dpi <= 0) g_dpi = 96;
 
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    MFStartup(MF_VERSION);      // 统计时长要用
 
     INITCOMMONCONTROLSEX icc = {0};
     icc.dwSize = sizeof(icc);
@@ -2013,6 +2111,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow) {
         }
     }
 
+    MFShutdown();
     CoUninitialize();
     return (int)msg.wParam;
 }
