@@ -820,15 +820,14 @@ static bool DoRename() {
     if (MessageBoxW(g_hMain, msg.c_str(), L"确认改名",
                     MB_YESNO | MB_ICONQUESTION) != IDYES) return false;
 
-    // ---- 两段式改名
+    // ---- 直接改名；冲突检查已确保目标名不存在
     struct Step { fs::path from, to; };
     std::vector<Step> done;
-    int pid = (int)GetCurrentProcessId();
     std::wstring failMsg;
     DWORD moveErr = 0;
 
     auto doMove = [&](const fs::path& a, const fs::path& b) -> bool {
-        if (MoveFileExW(a.c_str(), b.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        if (MoveFileExW(a.c_str(), b.c_str(), 0)) {
             done.push_back({ a, b });
             return true;
         }
@@ -836,32 +835,15 @@ static bool DoRename() {
         return false;
     };
 
-    // 阶段一：原名 → 临时名
-    std::vector<std::pair<size_t, fs::path>> temps;
     bool ok = true;
-    for (size_t i = 0; i < g_plan.size() && ok; ++i) {
+    for (size_t i = 0; i < g_plan.size(); ++i) {
         if (g_plan[i].oldName == g_plan[i].newName) continue;
-        wchar_t tmpn[160] = {0};
-        swprintf(tmpn, 160, L".rntmp_%d_%zu%ls", pid, i, g_plan[i].src.extension().c_str());
-        fs::path tmp = dir / tmpn;
         fs::path from = dir / g_plan[i].oldName;
-        if (!doMove(from, tmp)) {
+        fs::path to = dir / g_plan[i].newName;
+        if (!doMove(from, to)) {
             failMsg = L"无法重命名：" + g_plan[i].oldName + L"\n原因：" + MoveFailReason(moveErr);
             ok = false;
-        } else {
-            temps.push_back({ i, tmp });
-        }
-    }
-
-    // 阶段二：临时名 → 目标名
-    if (ok) {
-        for (auto& t : temps) {
-            fs::path target = dir / g_plan[t.first].newName;
-            if (!doMove(t.second, target)) {
-                failMsg = L"无法重命名为：" + g_plan[t.first].newName + L"\n原因：" + MoveFailReason(moveErr);
-                ok = false;
-                break;
-            }
+            break;
         }
     }
 
@@ -870,7 +852,7 @@ static bool DoRename() {
         for (auto it = done.rbegin(); it != done.rend(); ++it) {
             std::error_code ec;
             if (fs::exists(it->from, ec)) continue;
-            MoveFileExW(it->to.c_str(), it->from.c_str(), MOVEFILE_REPLACE_EXISTING);
+            MoveFileExW(it->to.c_str(), it->from.c_str(), 0);
         }
         MessageBoxW(g_hMain, (L"改名失败，已尽力回滚。\n\n" + failMsg).c_str(),
                     L"错误", MB_ICONERROR);
@@ -1967,27 +1949,21 @@ static int RunSelfTest() {
         CHECK(dupN == 2, L"沿用原集数时 EP08 与 第8集 被标为重名（2 项）");
     }
 
-    // 执行两段式改名
+    // 直接改名，验证目标名已预先确定且不覆盖现有文件
     if (made) {
         bool ok = true;
-        int pid = (int)GetCurrentProcessId();
         std::vector<std::pair<fs::path, fs::path>> done;
         for (size_t i = 0; i < plan.size(); ++i) {
-            wchar_t tn[160];
-            swprintf(tn, 160, L".rntmp_%d_%zu.mp4", pid, i);
             fs::path from = work / plan[i].oldName;
-            fs::path to   = work / tn;
-            fs::rename(from, to, ec);
-            if (ec) { ok = false; break; }
-            done.push_back({ to, work / plan[i].newName });
+            fs::path to = work / plan[i].newName;
+            if (!MoveFileExW(from.c_str(), to.c_str(), 0)) { ok = false; break; }
+            done.push_back({ from, to });
         }
-        if (ok) {
-            for (auto& d : done) {
-                fs::rename(d.first, d.second, ec);
-                if (ec) { ok = false; break; }
-            }
+        if (!ok) {
+            for (auto it = done.rbegin(); it != done.rend(); ++it)
+                MoveFileExW(it->second.c_str(), it->first.c_str(), 0);
         }
-        CHECK(ok, L"两段式改名执行成功");
+        CHECK(ok, L"直接改名执行成功");
 
         int found = 0;
         for (auto& e : fs::directory_iterator(work, ec))
