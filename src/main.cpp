@@ -755,6 +755,27 @@ static bool SaveUndo(const fs::path& folder,
     return true;
 }
 
+// 把 Win32 错误码翻成能照着处理的一句话
+static std::wstring MoveFailReason(DWORD e) {
+    switch (e) {
+    case ERROR_SHARING_VIOLATION:
+    case ERROR_LOCK_VIOLATION:
+        return L"文件正被其他程序占用（播放器、网盘同步、杀毒扫描），关掉后再试";
+    case ERROR_ACCESS_DENIED:
+        return L"没有权限（文件夹只读，或被安全软件拦下）";
+    case ERROR_FILE_NOT_FOUND:
+    case ERROR_PATH_NOT_FOUND:
+        return L"文件已经不在了，可能刚被移走或改过名，点「预览」刷新后再试";
+    case ERROR_ALREADY_EXISTS:
+    case ERROR_FILE_EXISTS:
+        return L"目标文件已存在";
+    case ERROR_FILENAME_EXCED_RANGE:
+        return L"路径太长（超过 260 个字符），把文件夹挪到更浅的位置";
+    default:
+        return L"系统错误 " + std::to_wstring(e);
+    }
+}
+
 // ------------------------------------------------------------------ 执行改名
 static bool DoRename() {
     if (g_plan.empty()) return false;
@@ -804,13 +825,15 @@ static bool DoRename() {
     std::vector<Step> done;
     int pid = (int)GetCurrentProcessId();
     std::wstring failMsg;
+    DWORD moveErr = 0;
 
     auto doMove = [&](const fs::path& a, const fs::path& b) -> bool {
-        std::error_code ec;
-        fs::rename(a, b, ec);
-        if (ec) return false;
-        done.push_back({ a, b });
-        return true;
+        if (MoveFileExW(a.c_str(), b.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+            done.push_back({ a, b });
+            return true;
+        }
+        moveErr = GetLastError();
+        return false;
     };
 
     // 阶段一：原名 → 临时名
@@ -823,7 +846,7 @@ static bool DoRename() {
         fs::path tmp = dir / tmpn;
         fs::path from = dir / g_plan[i].oldName;
         if (!doMove(from, tmp)) {
-            failMsg = L"无法重命名：" + g_plan[i].oldName;
+            failMsg = L"无法重命名：" + g_plan[i].oldName + L"\n原因：" + MoveFailReason(moveErr);
             ok = false;
         } else {
             temps.push_back({ i, tmp });
@@ -835,7 +858,7 @@ static bool DoRename() {
         for (auto& t : temps) {
             fs::path target = dir / g_plan[t.first].newName;
             if (!doMove(t.second, target)) {
-                failMsg = L"无法重命名为：" + g_plan[t.first].newName;
+                failMsg = L"无法重命名为：" + g_plan[t.first].newName + L"\n原因：" + MoveFailReason(moveErr);
                 ok = false;
                 break;
             }
@@ -847,7 +870,7 @@ static bool DoRename() {
         for (auto it = done.rbegin(); it != done.rend(); ++it) {
             std::error_code ec;
             if (fs::exists(it->from, ec)) continue;
-            fs::rename(it->to, it->from, ec);
+            MoveFileExW(it->to.c_str(), it->from.c_str(), MOVEFILE_REPLACE_EXISTING);
         }
         MessageBoxW(g_hMain, (L"改名失败，已尽力回滚。\n\n" + failMsg).c_str(),
                     L"错误", MB_ICONERROR);
@@ -1347,7 +1370,10 @@ L"    答：只处理视频扩展名，其它文件原样不动。\r\n"
 L"    问：支持哪些视频格式？\r\n"
 L"    答：mp4 mkv mov avi wmv flv m4v ts webm mpg mpeg rmvb rm 3gp m2ts vob ogv divx asf f4v。\r\n"
 L"    问：统计总时长里说有几个文件读不到时长？\r\n"
-L"    答：那几个格式系统没有解压器（多是 flv、rmvb），弹窗里已经列出来了，改名不受影响。\r\n";
+L"    答：那几个格式系统没有解压器（多是 flv、rmvb），弹窗里已经列出来了，改名不受影响。\r\n"
+L"    问：执行改名弹窗说「文件正被其他程序占用」？\r\n"
+L"    答：那个文件正被播放器、网盘同步或杀毒扫描占用，关掉占用它的程序再点一次即可。\r\n"
+L"    已经改过的会自动回滚，不会只改一半。\r\n";
 
 static HWND g_hTutWnd = nullptr;
 static HWND g_hTutEdit = nullptr;
@@ -2028,6 +2054,14 @@ static int RunSelfTest() {
     CHECK(FmtDuration(3725) == L"1 小时 2 分 5 秒", L"3725 秒 -> " + FmtDuration(3725));
     CHECK(FmtDuration(90) == L"1 分 30 秒", L"90 秒 -> " + FmtDuration(90));
     CHECK(FmtDuration(0) == L"0 秒", L"0 秒 -> " + FmtDuration(0));
+
+    // ---- 8. 改名失败原因
+    LOGW(L"\n[8] 改名失败原因\n");
+    CHECK(MoveFailReason(ERROR_SHARING_VIOLATION).find(L"占用") != std::wstring::npos,
+          L"占用 -> " + MoveFailReason(ERROR_SHARING_VIOLATION));
+    CHECK(MoveFailReason(ERROR_ACCESS_DENIED).find(L"权限") != std::wstring::npos,
+          L"权限 -> " + MoveFailReason(ERROR_ACCESS_DENIED));
+    CHECK(MoveFailReason(1234) == L"系统错误 1234", L"未知码 -> " + MoveFailReason(1234));
 
     LOGW(L"\n=== 结果：%ls（失败 %d 项）===\n",
         g_fail == 0 ? L"全部通过" : L"存在失败", g_fail);
