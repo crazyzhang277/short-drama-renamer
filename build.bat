@@ -2,7 +2,7 @@
 setlocal
 cd /d "%~dp0"
 
-set "MINGW=C:\Users\EDY\AppData\Local\dsh-tools\msys2\mingw64\bin"
+set "MINGW=%LOCALAPPDATA%\dsh-tools\msys2\mingw64\bin"
 if not exist "%MINGW%\g++.exe" (
   echo [x] 找不到 C++ 编译器：%MINGW%
   echo     请先执行： pwsh -NoProfile -File .\install-toolchain.ps1
