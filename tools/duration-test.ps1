@@ -1,8 +1,8 @@
 param(
-    [string]$Exe = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\短剧更名工具.exe',
+    [string]$Exe = (Join-Path (Split-Path -Parent $PSScriptRoot) '短剧更名工具.exe'),
     [string]$Dir = (Join-Path $env:TEMP 'dur-test'),
-    [string]$ShotMain = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\shot-duration.png',
-    [string]$ShotDlg  = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\shot-duration-dialog.png'
+    [string]$ShotMain = (Join-Path (Split-Path -Parent $PSScriptRoot) 'shot-duration.png'),
+    [string]$ShotDlg  = (Join-Path (Split-Path -Parent $PSScriptRoot) 'shot-duration-dialog.png')
 )
 # 点「统计总时长」按钮（IDC_BTN_DURATION = 1024），读出弹窗文字，截图，再关掉弹窗
 Add-Type -AssemblyName System.Drawing

@@ -64,7 +64,7 @@ public class UI {
 "@
 [UI]::SetProcessDPIAware() | Out-Null
 
-$exe = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\src\renamer.exe'
+$exe = (Join-Path (Split-Path -Parent $PSScriptRoot) '短剧更名工具.exe')
 $work = Join-Path $env:TEMP 'rn-ui-test'
 if (Test-Path $work) { Remove-Item $work -Recurse -Force }
 New-Item -ItemType Directory $work | Out-Null

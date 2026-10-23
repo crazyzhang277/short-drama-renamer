@@ -1,6 +1,6 @@
 param(
-    [string]$Exe = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\src\renamer.exe',
-    [string]$Demo = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\_gap\Test Drama'
+    [string]$Exe = (Join-Path (Split-Path -Parent $PSScriptRoot) '短剧更名工具.exe'),
+    [string]$Demo = (Join-Path (Split-Path -Parent $PSScriptRoot) '_gap\Test Drama')
 )
 
 Add-Type @"

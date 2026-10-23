@@ -388,7 +388,6 @@ static bool IsNoiseSegment(const std::wstring& raw) {
         L"program files", L"program files (x86)", L"programdata", L"windows",
         L"system32", L"onedrive", L"library", L"home", L"root", L"disk",
         L"new folder", L"new folder (2)", L"untitled", L"output", L"out",
-        L"deepseek-harness", L"dsh-tools", L"autorename",
         L"新建文件夹", L"未命名", L"未命名文件夹", L"我的视频", L"我的文档",
         L"视频", L"影片", L"影视", L"短剧", L"短剧视频", L"剧集", L"合集",
         L"下载", L"桌面", L"文档", L"图片", L"音乐", L"收藏夹",
@@ -2471,7 +2470,7 @@ static int RunSelfTest() {
 
     // ---- 6. 从文件夹名识别剧名
     LOGW(L"\n[6] 从文件夹名识别剧名\n");
-    CHECK(GuessTitleFromFolder(L"C:\\Users\\EDY\\Desktop\\dignity reborn") ==
+    CHECK(GuessTitleFromFolder(L"C:\\Users\\Public\\Desktop\\dignity reborn") ==
               L"Dignity Reborn",
           L"跳过盘符/Users/Desktop -> Dignity Reborn");
     CHECK(GuessTitleFromFolder(L"D:\\短剧\\别惹我，夫人") == L"别惹我，夫人",
@@ -2479,7 +2478,7 @@ static int RunSelfTest() {
     CHECK(GuessTitleFromFolder(L"E:\\the_lost-HEIRESS.of time") ==
               L"The Lost Heiress Of Time",
           L"下划线/连字符/点转空格并首字母大写");
-    CHECK(GuessTitleFromFolder(L"C:\\Users\\EDY\\Videos\\视频\\下载") == L"",
+    CHECK(GuessTitleFromFolder(L"C:\\Users\\Public\\Videos\\视频\\下载") == L"",
           L"全是通用目录名时返回空");
     CHECK(GuessTitleFromFolder(L"C:\\") == L"", L"只有盘符时返回空");
     CHECK(GuessTitleFromFolder(L"D:\\新建文件夹\\1") == L"",

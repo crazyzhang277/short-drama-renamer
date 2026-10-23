@@ -1,8 +1,8 @@
 param(
-    [string]$Exe = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\src\renamer.exe',
-    [string]$Demo = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\_demo\Dignity Reborn',
-    [string]$OutMain = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\shot.png',
-    [string]$OutTut = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\shot-tutorial.png'
+    [string]$Exe = (Join-Path (Split-Path -Parent $PSScriptRoot) '短剧更名工具.exe'),
+    [string]$Demo = (Join-Path (Split-Path -Parent $PSScriptRoot) '_demo\Dignity Reborn'),
+    [string]$OutMain = (Join-Path (Split-Path -Parent $PSScriptRoot) 'shot.png'),
+    [string]$OutTut = (Join-Path (Split-Path -Parent $PSScriptRoot) 'shot-tutorial.png')
 )
 
 Add-Type -AssemblyName System.Drawing

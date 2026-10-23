@@ -2,14 +2,14 @@
 setlocal
 cd /d "%~dp0"
 
-set "MINGW=%LOCALAPPDATA%\dsh-tools\msys2\mingw64\bin"
-if not exist "%MINGW%\g++.exe" (
-  echo [x] 找不到 C++ 编译器：%MINGW%
-  echo     请先执行： pwsh -NoProfile -File .\install-toolchain.ps1
+set "MINGW=%LOCALAPPDATA%\short-drama-renamer\mingw64\bin"
+if exist "%MINGW%\g++.exe" set "PATH=%MINGW%;%PATH%"
+where g++.exe >nul 2>nul
+if errorlevel 1 (
+  echo [x] 找不到 C++ 编译器 g++，请先执行： pwsh -NoProfile -File .\install-toolchain.ps1
   pause
   exit /b 1
 )
-set "PATH=%MINGW%;%PATH%"
 
 echo [1/4] 编译资源 ...
 windres.exe -I src -O coff -o src\app.res src\app.rc

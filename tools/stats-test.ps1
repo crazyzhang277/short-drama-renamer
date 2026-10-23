@@ -1,7 +1,7 @@
 param(
-    [string]$Exe  = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\短剧更名工具.exe',
-    [string]$Root = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\_demo\stats',
-    [string]$Shot = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\shot-stats.png',
+    [string]$Exe  = (Join-Path (Split-Path -Parent $PSScriptRoot) '短剧更名工具.exe'),
+    [string]$Root = (Join-Path (Split-Path -Parent $PSScriptRoot) '_demo\stats'),
+    [string]$Shot = (Join-Path (Split-Path -Parent $PSScriptRoot) 'shot-stats.png'),
     [string]$FFmpeg = 'C:\ffmpeg\bin\ffmpeg.exe'
 )
 

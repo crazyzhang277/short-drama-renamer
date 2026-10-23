@@ -1,6 +1,6 @@
 param(
-    [string]$Exe = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\src\renamer.exe',
-    [string]$Demo = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\_demo\Dignity Reborn'
+    [string]$Exe = (Join-Path (Split-Path -Parent $PSScriptRoot) '短剧更名工具.exe'),
+    [string]$Demo = (Join-Path (Split-Path -Parent $PSScriptRoot) '_demo\Dignity Reborn')
 )
 
 Add-Type @"

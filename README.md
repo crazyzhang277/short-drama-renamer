@@ -208,7 +208,7 @@ mp4 mkv mov avi wmv flv m4v ts webm mpg mpeg rmvb rm 3gp m2ts vob ogv divx asf f
 ## 八、从源码重新编译
 
 需要 MinGW-w64（`g++` + `windres`，GCC 13 以上即可）。没有的话 `install-toolchain.ps1` 会下载便携版到
-`%LOCALAPPDATA%\dsh-tools\msys2`，不需要管理员权限；`build.bat` 默认从这个位置找编译器。
+`%LOCALAPPDATA%\short-drama-renamer\mingw64`，不需要管理员权限；`build.bat` 默认从这个位置找编译器。
 
 ```powershell
 # 如果换了机器 / 环境丢了，先装工具链（约 19 个包，走清华镜像）

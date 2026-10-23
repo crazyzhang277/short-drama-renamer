@@ -29,7 +29,7 @@ public class EW {
 "@
 [EW]::SetProcessDPIAware() | Out-Null
 
-$exe = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\src\renamer.exe'
+$exe = (Join-Path (Split-Path -Parent $PSScriptRoot) '短剧更名工具.exe')
 $proc = Start-Process -FilePath $exe -PassThru
 $h = [IntPtr]::Zero
 for ($i=0; $i -lt 40; $i++) {

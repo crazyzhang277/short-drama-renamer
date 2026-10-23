@@ -1,6 +1,6 @@
 param(
-    [string]$Exe = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\短剧更名工具.exe',
-    [string]$Demo = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\_demo\The CEO Heiress'
+    [string]$Exe = (Join-Path (Split-Path -Parent $PSScriptRoot) '短剧更名工具.exe'),
+    [string]$Demo = (Join-Path (Split-Path -Parent $PSScriptRoot) '_demo\The CEO Heiress')
 )
 
 Add-Type -AssemblyName System.Drawing
@@ -79,6 +79,6 @@ function RunOne($keep, $out) {
     Start-Sleep -Milliseconds 500
 }
 
-RunOne $false 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\shot-gap-off.png'
-RunOne $true  'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\shot-gap-on.png'
+RunOne $false (Join-Path (Split-Path -Parent $PSScriptRoot) 'shot-gap-off.png')
+RunOne $true  (Join-Path (Split-Path -Parent $PSScriptRoot) 'shot-gap-on.png')
 Write-Host 'done'

@@ -1,6 +1,6 @@
 param(
-    [string]$Exe = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\src\renamer.exe',
-    [string]$Out = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\shot.png',
+    [string]$Exe = (Join-Path (Split-Path -Parent $PSScriptRoot) '短剧更名工具.exe'),
+    [string]$Out = (Join-Path (Split-Path -Parent $PSScriptRoot) 'shot.png'),
     [string]$DropDir = ''
 )
 

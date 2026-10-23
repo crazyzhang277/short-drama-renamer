@@ -30,7 +30,7 @@ public class UI {
 "@
 [UI]::SetProcessDPIAware() | Out-Null
 
-$exe  = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\短剧更名工具.exe'
+$exe  = (Join-Path (Split-Path -Parent $PSScriptRoot) '短剧更名工具.exe')
 $work = Join-Path $env:TEMP 'rn-e2e'
 if (Test-Path $work) { Remove-Item $work -Recurse -Force }
 New-Item -ItemType Directory $work | Out-Null

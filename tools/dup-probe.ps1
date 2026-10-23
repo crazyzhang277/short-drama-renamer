@@ -1,6 +1,6 @@
 param(
-    [string]$Exe = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\src\renamer.exe',
-    [string]$Demo = 'C:\Users\EDY\Documents\deepseek-harness\自动更名工具\_dup\Test Drama'
+    [string]$Exe = (Join-Path (Split-Path -Parent $PSScriptRoot) '短剧更名工具.exe'),
+    [string]$Demo = (Join-Path (Split-Path -Parent $PSScriptRoot) '_dup\Test Drama')
 )
 
 Add-Type @"
@@ -66,7 +66,7 @@ $r = New-Object RECT
 $bmp = New-Object System.Drawing.Bitmap ($r.Right - $r.Left), ($r.Bottom - $r.Top)
 $g = [System.Drawing.Graphics]::FromImage($bmp)
 $g.CopyFromScreen($r.Left, $r.Top, 0, 0, $bmp.Size)
-$bmp.Save('C:\Users\EDY\Documents\deepseek-harness\自动更名工具\_dup-before.png')
+$bmp.Save((Join-Path (Split-Path -Parent $PSScriptRoot) '_dup-before.png'))
 $g.Dispose(); $bmp.Dispose()
 Write-Host "已截图 _dup-before.png"
 

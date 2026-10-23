@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
 
 $base = 'https://mirrors.tuna.tsinghua.edu.cn/msys2/mingw/mingw64/'
-$root = Join-Path $env:LOCALAPPDATA 'dsh-tools\msys2'
+$root = Join-Path $env:LOCALAPPDATA 'short-drama-renamer'
 $pkgs = Join-Path $root '_pkgs'
 New-Item -ItemType Directory -Force $root | Out-Null
 New-Item -ItemType Directory -Force $pkgs | Out-Null
