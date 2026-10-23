@@ -27,6 +27,7 @@
 #include <cstring>
 #include <cstdarg>
 #include <cstdio>
+#include <cmath>
 #include <io.h>
 #include <fcntl.h>
 
@@ -58,6 +59,22 @@ enum {
     IDC_HELP_TEXT,
     IDC_HELP_CLOSE,
     IDC_BTN_DURATION,
+    // 剧集统计页
+    IDC_ST_FOLDER1,
+    IDC_ST_BROWSE1,
+    IDC_ST_FOLDER2,
+    IDC_ST_BROWSE2,
+    IDC_ST_TITLE1,
+    IDC_ST_DY,
+    IDC_ST_EP1,
+    IDC_ST_DUR1,
+    IDC_ST_TITLE2,
+    IDC_ST_EP2,
+    IDC_ST_DUR2,
+    IDC_ST_SPECIAL,
+    IDC_ST_BTN_SCAN,
+    IDC_ST_BTN_COPY,
+    IDC_ST_REPORT,
 };
 
 static const UINT_PTR IDT_REFRESH = 1;   // 自动刷新的防抖定时器
@@ -68,6 +85,10 @@ static HWND  g_hMain, g_hFolder, g_hBrowse, g_hList, g_hTitle, g_hStart, g_hPad,
              g_hSort, g_hTag, g_hCustom, g_hColon, g_hPreview, g_hRename,
              g_hUndo, g_hTitles, g_hOpen, g_hSub, g_hStatus, g_hGuess, g_hAuto,
              g_hHelp, g_hKeepEp, g_hDuration;
+// 剧集统计页控件
+static HWND  g_stF1, g_stB1, g_stF2, g_stB2, g_stT1, g_stDy, g_stEp1, g_stDur1,
+             g_stT2, g_stEp2, g_stDur2, g_stSpecial, g_stScan, g_stCopy, g_stReport;
+static int   g_page = 0;          // 0 = 批量改名，1 = 剧集统计
 static HFONT g_fontUI, g_fontTitle, g_fontSub, g_fontBtn;
 static HBRUSH g_brBack;
 static int   g_dpi = 96;
@@ -75,6 +96,7 @@ static int   g_dpi = 96;
 static inline int S(int v) { return MulDiv(v, g_dpi, 96); }
 
 static const int HEADER_H = 62;
+static const int TAB_H    = 40;   // 顶部功能页签条
 static const int LBL_W    = 92;   // 字段标签区宽度（96dpi 基准）
 
 // ------------------------------------------------------------------ 标签表
@@ -1057,6 +1079,212 @@ static void DoCountDuration() {
     MessageBoxW(g_hMain, msg.c_str(), L"统计总时长", MB_ICONINFORMATION);
 }
 
+// ------------------------------------------------------------------ 剧集统计
+static std::wstring FmtClock(long sec) {
+    if (sec < 0) sec = 0;
+    long h = sec / 3600, m = (sec % 3600) / 60, s = sec % 60;
+    wchar_t b[32] = {0};
+    if (h > 0) swprintf(b, 32, L"%ld:%02ld:%02ld", h, m, s);
+    else       swprintf(b, 32, L"%ld:%02ld", m, s);
+    return b;
+}
+
+// secs[i] 是该集秒数（读不到为 0），eps[i] 是集号
+static std::wstring BuildSpecialText(int count, const std::vector<double>& secs,
+                                     const std::vector<int>& eps) {
+    if (count <= 0) return L"";
+    std::wstring list;
+    int full = 0, partial = 0;
+    double mn = 0, mx = 0;
+    for (size_t i = 0; i < secs.size() && (int)i < count; ++i) {
+        double d = secs[i];
+        if (d <= 0) continue;                       // 读不到时长的文件不参与区间统计
+        if (d >= 59.5) {
+            full++;
+            if (!list.empty()) list += L"、";
+            list += std::to_wstring(eps.size() > i && eps[i] > 0 ? eps[i] : (int)i + 1);
+        } else {
+            if (partial == 0) { mn = mx = d; }
+            if (d < mn) mn = d;
+            if (d > mx) mx = d;
+            partial++;
+        }
+    }
+
+    std::wstring s = L"剧集共" + std::to_wstring(count) + L"集";
+    if (full == 0) {
+        if (partial > 0) {
+            long lo = (long)mn, hi = (long)std::ceil(mx);
+            s += L"，均为" + std::to_wstring(lo) +
+                 (lo == hi ? L"秒" : L"-" + std::to_wstring(hi) + L"秒");
+        }
+        return s;
+    }
+    if (full == count) return s + L"，均满1分钟";
+
+    s += L"，其中第" + list + L"集满1分钟，其余" + std::to_wstring(count - full)
+       + L"集均不满一分钟";
+    if (partial > 0) {
+        long lo = (long)mn, hi = (long)std::ceil(mx);
+        s += L"，为" + std::to_wstring(lo) +
+             (lo == hi ? L"秒" : L"-" + std::to_wstring(hi) + L"秒之间");
+    }
+    return s;
+}
+
+// 报送文案：固定格式 + 填进去的变量
+static std::wstring ComposeReport(const std::wstring& t1, const std::wstring& dy,
+                                  const std::wstring& ep1, const std::wstring& dur1,
+                                  const std::wstring& t2, const std::wstring& ep2,
+                                  const std::wstring& dur2, const std::wstring& special) {
+    std::wstring s;
+    if (!t1.empty() || !dy.empty()) {
+        s += L"原剧:\r\n";
+        std::wstring line = t1;
+        if (!dy.empty()) line += L"（dy：" + dy + L"）";
+        s += line + L"\r\n";
+    }
+    if (!ep1.empty())  s += L"集数: " + ep1 + L"\r\n";
+    if (!dur1.empty()) s += L"时长: " + dur1 + L"\r\n";
+    if (!s.empty())    s += L"\r\n";
+
+    if (!t2.empty()) s += L"海外转译后:\r\n" + t2 + L"\r\n";
+    if (!ep2.empty())  s += L"集数: " + ep2 + L"\r\n";
+    if (!dur2.empty()) s += L"时长: " + dur2 + L"\r\n";
+    if (!special.empty()) s += L"特殊情况: " + special + L"\r\n";
+
+    while (!s.empty() && (s.back() == L'\n' || s.back() == L'\r')) s.pop_back();
+    return s;
+}
+
+// 一个文件夹的统计结果
+struct DramaScan {
+    int  count = 0;
+    long total = 0;          // 各单位四舍五入后相加
+    int  bad   = 0;          // 读不到时长的文件数
+    std::vector<double> secs;
+    std::vector<int>    eps;
+};
+
+static bool ScanDrama(const std::wstring& folder, bool sub, DramaScan& r, std::wstring& err) {
+    r = DramaScan();
+    std::error_code ec;
+    if (folder.empty() || !fs::is_directory(folder, ec)) { err = L"文件夹不存在"; return false; }
+
+    std::vector<fs::path> files;
+    CollectFiles(fs::path(folder), sub, files);
+    if (files.empty()) { err = L"没有视频文件"; return false; }
+
+    struct Ent { fs::path p; long ep; };
+    std::vector<Ent> v;
+    int parsed = 0;
+    for (auto& p : files) {
+        EpResult e = ParseEpisode(p.filename().wstring());
+        if (e.ep > 0) parsed++;
+        v.push_back({ p, e.ep });
+    }
+    bool byEp = (parsed * 10 >= (int)v.size() * 6);
+    if (byEp) {
+        std::stable_sort(v.begin(), v.end(), [](const Ent& a, const Ent& b) {
+            if (a.ep != b.ep) return a.ep < b.ep;
+            return NaturalCompare(a.p.filename().wstring(), b.p.filename().wstring()) < 0;
+        });
+    } else {
+        std::stable_sort(v.begin(), v.end(), [](const Ent& a, const Ent& b) {
+            return NaturalCompare(a.p.filename().wstring(), b.p.filename().wstring()) < 0;
+        });
+    }
+
+    r.count = (int)v.size();
+    for (size_t i = 0; i < v.size(); ++i) {
+        double sec = 0;
+        bool ok = VideoDurationSec(v[i].p, sec);
+        r.secs.push_back(ok ? sec : 0.0);
+        r.eps.push_back(byEp && v[i].ep > 0 ? (int)v[i].ep : (int)i + 1);
+        if (ok) r.total += (long)(sec + 0.5);
+        else    r.bad++;
+        if ((i % 8) == 0) {
+            wchar_t b[256] = {0};
+            swprintf(b, 256, L"统计剧集信息中… %zu / %zu", i + 1, v.size());
+            SetStatus(b);
+        }
+    }
+    return true;
+}
+
+static void UpdateReport() {
+    std::wstring text = ComposeReport(
+        Trim(GetText(g_stT1)), Trim(GetText(g_stDy)),
+        Trim(GetText(g_stEp1)), Trim(GetText(g_stDur1)),
+        Trim(GetText(g_stT2)), Trim(GetText(g_stEp2)),
+        Trim(GetText(g_stDur2)), Trim(GetText(g_stSpecial)));
+    SetWindowTextW(g_stReport, text.c_str());
+}
+
+static void DoScanStats() {
+    std::wstring f1 = Trim(GetText(g_stF1)), f2 = Trim(GetText(g_stF2));
+    if (f1.empty() && f2.empty()) {
+        MessageBoxW(g_hMain, L"请先选择原剧或海外剧所在的文件夹。", L"剧集统计", MB_ICONWARNING);
+        return;
+    }
+    bool sub = SendMessageW(g_hSub, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    bool same = !f1.empty() && _wcsicmp(f1.c_str(), f2.c_str()) == 0;
+
+    HCURSOR oldCur = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+    DramaScan s1, s2;
+    std::wstring e1, e2;
+    bool ok1 = false, ok2 = false;
+    if (!f1.empty()) ok1 = ScanDrama(f1, sub, s1, e1);
+    if (!f2.empty()) {
+        ok2 = same ? ok1 : ScanDrama(f2, sub, s2, e2);
+        if (same) s2 = s1;
+    }
+    SetCursor(oldCur);
+
+    if (!ok1 && !ok2) {
+        std::wstring msg = L"没有统计到视频。\n";
+        if (!f1.empty()) msg += L"\n原剧：" + e1;
+        if (!f2.empty()) msg += L"\n海外：" + e2;
+        MessageBoxW(g_hMain, msg.c_str(), L"剧集统计", MB_ICONWARNING);
+        return;
+    }
+
+    g_suppress = true;
+    if (ok1) {
+        SetWindowTextW(g_stEp1, std::to_wstring(s1.count).c_str());
+        SetWindowTextW(g_stDur1, FmtClock(s1.total).c_str());
+    }
+    if (ok2) {
+        SetWindowTextW(g_stEp2, std::to_wstring(s2.count).c_str());
+        SetWindowTextW(g_stDur2, FmtClock(s2.total).c_str());
+    }
+    const DramaScan& sp = ok2 ? s2 : s1;
+    if (sp.count > 0) SetWindowTextW(g_stSpecial, BuildSpecialText(sp.count, sp.secs, sp.eps).c_str());
+    g_suppress = false;
+
+    UpdateReport();
+
+    std::wstring st;
+    auto part = [&](const wchar_t* name, const DramaScan& s, bool ok) {
+        if (!ok) return;
+        if (!st.empty()) st += L"  ｜  ";
+        st += std::wstring(name) + L" " + std::to_wstring(s.count) + L" 集 · " + FmtClock(s.total);
+        if (s.bad > 0) st += L"（" + std::to_wstring(s.bad) + L" 个读不到时长）";
+    };
+    part(L"原剧", s1, ok1);
+    part(L"海外", s2, ok2);
+    if (st.empty()) st = L"统计完成";
+    SetStatus(st);
+}
+
+// 自动识别剧名后回填（文件夹名 -> 剧名）
+static void GuessInto(HWND edit, const std::wstring& folder) {
+    if (!Trim(GetText(edit)).empty()) return;
+    std::wstring t = GuessTitleFromFolder(folder);
+    if (!t.empty()) SetWindowTextW(edit, t.c_str());
+}
+
+
 // ------------------------------------------------------------------ 选文件夹
 static bool PickFolder(std::wstring& out) {
     IFileOpenDialog* pDlg = nullptr;
@@ -1169,12 +1397,58 @@ static void LoadSettings() {
 }
 
 // ------------------------------------------------------------------ 布局
+static void LayoutStats(int W, int H) {
+    int m = S(16);
+    int bx = m + S(LBL_W);
+    int y = S(HEADER_H) + S(TAB_H) + S(14);
+    int eh = S(28), rh = S(38);
+    int right = W - m;
+
+    MoveWindow(g_stF1, bx, y, right - bx - S(96), eh, TRUE);
+    MoveWindow(g_stB1, right - S(88), y, S(88), eh, TRUE);
+    y += rh;
+    MoveWindow(g_stF2, bx, y, right - bx - S(96), eh, TRUE);
+    MoveWindow(g_stB2, right - S(88), y, S(88), eh, TRUE);
+    y += rh;
+
+    // 剧名 / dy 别名 / 集数 / 时长 四列对齐
+    int titleW = S(240), dyW = S(150), epW = S(56), durW = S(88);
+    int xDy  = bx + titleW + S(16) + S(LBL_W);
+    int xEp  = xDy + dyW + S(16) + S(LBL_W);
+    int xDur = xEp + epW + S(16) + S(LBL_W);
+    MoveWindow(g_stT1, bx, y, titleW, eh, TRUE);
+    MoveWindow(g_stDy, xDy, y, dyW, eh, TRUE);
+    MoveWindow(g_stEp1, xEp, y, epW, eh, TRUE);
+    MoveWindow(g_stDur1, xDur, y, durW, eh, TRUE);
+    y += rh;
+    MoveWindow(g_stT2, bx, y, titleW, eh, TRUE);
+    MoveWindow(g_stEp2, xEp, y, epW, eh, TRUE);
+    MoveWindow(g_stDur2, xDur, y, durW, eh, TRUE);
+    y += rh;
+
+    MoveWindow(g_stSpecial, bx, y, right - bx, eh, TRUE);
+    y += rh + S(6);
+
+    int btnH = S(38);
+    MoveWindow(g_stScan, m, y, S(116), btnH, TRUE);
+    MoveWindow(g_stCopy, m + S(116) + S(10), y, S(116), btnH, TRUE);
+    y += btnH + S(10);
+
+    int bottom = H - S(40);
+    if (bottom - y < S(60)) bottom = y + S(60);
+    MoveWindow(g_stReport, m, y, W - m * 2, bottom - y, TRUE);
+
+    MoveWindow(g_hStatus, m, H - S(32), W - m * 2, S(22), TRUE);
+    InvalidateRect(g_hMain, nullptr, FALSE);
+}
+
 static void Layout(HWND hwnd) {
     RECT rc;
     GetClientRect(hwnd, &rc);
     int W = rc.right, H = rc.bottom;
+    if (g_page == 1) { LayoutStats(W, H); return; }
     int m = S(16);
-    int y = S(HEADER_H) + S(14);
+    int y = S(HEADER_H) + S(TAB_H) + S(14);
     int bx = m + S(LBL_W);
 
     // 行1 文件夹
@@ -1287,6 +1561,105 @@ static void DrawLabels(HDC hdc, HWND hwnd) {
     SelectObject(hdc, old);
 }
 
+// ------------------------------------------------------------------ 顶部页签
+static RECT TabRect(int i) {
+    int x = S(16) + i * S(124);
+    RECT r = { x, S(HEADER_H), x + S(116), S(HEADER_H) + S(TAB_H) };
+    return r;
+}
+
+static void DrawTabs(HDC hdc, const RECT& rc) {
+    RECT bar = { 0, S(HEADER_H), rc.right, S(HEADER_H) + S(TAB_H) };
+    HBRUSH wb = CreateSolidBrush(RGB(255, 255, 255));
+    FillRect(hdc, &bar, wb);
+    DeleteObject(wb);
+    RECT line = { 0, S(HEADER_H) + S(TAB_H) - 1, rc.right, S(HEADER_H) + S(TAB_H) };
+    HBRUSH lb = CreateSolidBrush(RGB(226, 232, 240));
+    FillRect(hdc, &line, lb);
+    DeleteObject(lb);
+
+    const wchar_t* names[2] = { L"批量改名", L"剧集统计" };
+    SetBkMode(hdc, TRANSPARENT);
+    HFONT old = (HFONT)SelectObject(hdc, g_fontUI);
+    for (int i = 0; i < 2; ++i) {
+        RECT r = TabRect(i);
+        bool on = (g_page == i);
+        SetTextColor(hdc, on ? RGB(15, 23, 42) : RGB(100, 116, 139));
+        DrawTextW(hdc, names[i], -1, &r, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+        if (on) {
+            RECT u = { r.left + S(18), r.bottom - S(3), r.right - S(18), r.bottom };
+            HBRUSH ub = CreateSolidBrush(RGB(37, 99, 235));
+            FillRect(hdc, &u, ub);
+            DeleteObject(ub);
+        }
+    }
+    SelectObject(hdc, old);
+}
+
+static void DrawStatsLabels(HDC hdc, HWND hwnd) {
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, RGB(71, 85, 105));
+    HFONT old = (HFONT)SelectObject(hdc, g_fontUI);
+
+    auto lblAt = [&](HWND c, const wchar_t* text) {
+        RECT r;
+        GetWindowRect(c, &r);
+        MapWindowPoints(HWND_DESKTOP, hwnd, (POINT*)&r, 2);
+        RECT t = { r.left - S(LBL_W) - S(2), r.top, r.left - S(8), r.bottom };
+        DrawTextW(hdc, text, -1, &t, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+    };
+    lblAt(g_stF1, L"原剧文件夹");
+    lblAt(g_stF2, L"海外文件夹");
+    lblAt(g_stT1, L"原剧名");
+    lblAt(g_stDy, L"dy 别名");
+    lblAt(g_stEp1, L"集数");
+    lblAt(g_stDur1, L"时长");
+    lblAt(g_stT2, L"海外剧名");
+    lblAt(g_stEp2, L"集数");
+    lblAt(g_stDur2, L"时长");
+    lblAt(g_stSpecial, L"特殊情况");
+
+    RECT br;
+    GetWindowRect(g_stCopy, &br);
+    MapWindowPoints(HWND_DESKTOP, hwnd, (POINT*)&br, 2);
+    RECT hint = { br.right + S(16), br.top, br.right + S(520), br.bottom };
+    SetTextColor(hdc, RGB(100, 116, 139));
+    DrawTextW(hdc, L"报送文案格式固定，统计后点「复制文案」直接粘贴", -1, &hint,
+              DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+
+    SelectObject(hdc, old);
+}
+
+// ------------------------------------------------------------------ 页切换
+static void ShowPage(HWND hwnd, int page) {
+    g_page = page;
+    HWND renameCtl[] = { g_hFolder, g_hBrowse, g_hTitle, g_hStart, g_hPad, g_hSub,
+                         g_hSort, g_hTag, g_hCustom, g_hColon, g_hList, g_hPreview,
+                         g_hRename, g_hUndo, g_hTitles, g_hOpen, g_hGuess, g_hAuto,
+                         g_hKeepEp, g_hHelp, g_hDuration };
+    HWND statsCtl[] = { g_stF1, g_stB1, g_stF2, g_stB2, g_stT1, g_stDy, g_stEp1,
+                        g_stDur1, g_stT2, g_stEp2, g_stDur2, g_stSpecial, g_stScan,
+                        g_stCopy, g_stReport };
+    for (HWND h : renameCtl) ShowWindow(h, page == 0 ? SW_SHOW : SW_HIDE);
+    for (HWND h : statsCtl)  ShowWindow(h, page == 1 ? SW_SHOW : SW_HIDE);
+
+    if (page == 1) {
+        // 改名页已经选好文件夹/剧名的，直接带过来当「海外」
+        if (Trim(GetText(g_stF2)).empty()) {
+            std::wstring f = Trim(GetText(g_hFolder));
+            if (!f.empty()) SetWindowTextW(g_stF2, f.c_str());
+        }
+        if (Trim(GetText(g_stT2)).empty()) {
+            std::wstring t = Trim(GetText(g_hTitle));
+            if (!t.empty()) SetWindowTextW(g_stT2, t.c_str());
+        }
+        UpdateReport();
+    }
+    SetFocus(hwnd);
+    Layout(hwnd);
+    InvalidateRect(hwnd, nullptr, TRUE);
+}
+
 // ------------------------------------------------------------------ 使用教程窗口
 static const wchar_t* kTutorialText =
 L"短剧视频批量更名工具 · 使用教程\r\n"
@@ -1334,7 +1707,18 @@ L"        视频、短剧、影视、素材、新建文件夹、下载、桌面 
 L"    遇到像剧名的目录名就拿来用；英文会自动首字母大写，下划线和点换成空格。\r\n"
 L"    找不到时不会乱填，会弹提示让你手动输入。\r\n"
 L"\r\n"
-L"五、安全机制\r\n"
+L"五、剧集统计（生成报送文案）\r\n"
+L"    顶部有两个页签：批量改名、剧集统计。点「剧集统计」切过去。\r\n"
+L"    原剧文件夹：原版短剧放的目录。\r\n"
+L"    海外文件夹：海外转译版放的目录。\r\n"
+L"    填好点「统计信息」，两边各扫一遍，自动算出集数和总时长。\r\n"
+L"    剧名会按目录名自动认出来，认错了直接改；集数、时长也能手改。\r\n"
+L"    特殊情况按海外剧的每集时长自动判断：哪几集满 1 分钟、其余几集不满 1 分钟、区间多少秒。\r\n"
+L"    下方大框就是报送文案，格式固定（原剧 / 集数 / 时长 / 海外转译后 / 特殊情况），\r\n"
+L"    改上面任何一格都会立刻同步。点「复制文案」直接粘给对接的人。\r\n"
+L"    两个文件夹填成同一个也行，只扫一次。\r\n"
+L"\r\n"
+L"六、安全机制\r\n"
 L"    · 先预览后执行，改名前能看到每一个结果。\r\n"
 L"    · 重名、目标已存在、路径过长、非法字符，都会在预览阶段拦住。\r\n"
 L"    · 改名分两步走（先临时名再目标名），中途失败会自动回滚。\r\n"
@@ -1342,7 +1726,7 @@ L"    · 每次改名都在文件夹下留一份 .rename-tool\\undo-时间.txt �
 L"    · 点「撤销上次」可以完整还原，多次改名就多按几次。\r\n"
 L"    · 「复制标题清单」把带英文冒号的完整标题复制到剪贴板，方便贴到别处。\r\n"
 L"\r\n"
-L"六、常见问题\r\n"
+L"七、常见问题\r\n"
 L"    问：改完发现剧名填错了怎么办？\r\n"
 L"    答：点「撤销上次」还原，改好剧名重新执行一次。\r\n"
 L"    问：视频会不会被移动或删除？\r\n"
@@ -1534,10 +1918,40 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             WS_CHILD | WS_VISIBLE | SS_LEFT | SS_ENDELLIPSIS,
             0,0,0,0, hwnd, (HMENU)IDC_STATUS, g_hInst, nullptr);
 
+        // ---- 剧集统计页（先不显示，切页时再 ShowWindow）
+        DWORD se = WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL;
+        auto mkEdit = [&](int id, const wchar_t* txt, DWORD style) {
+            return CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", txt, style,
+                0,0,0,0, hwnd, (HMENU)(INT_PTR)id, g_hInst, nullptr);
+        };
+        auto mkBtn = [&](int id, const wchar_t* txt, DWORD style) {
+            return CreateWindowExW(0, L"BUTTON", txt, style,
+                0,0,0,0, hwnd, (HMENU)(INT_PTR)id, g_hInst, nullptr);
+        };
+        g_stF1  = mkEdit(IDC_ST_FOLDER1, L"", se);
+        g_stB1  = mkBtn(IDC_ST_BROWSE1, L"浏览...", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON);
+        g_stF2  = mkEdit(IDC_ST_FOLDER2, L"", se);
+        g_stB2  = mkBtn(IDC_ST_BROWSE2, L"浏览...", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON);
+        g_stT1  = mkEdit(IDC_ST_TITLE1, L"", se);
+        g_stDy  = mkEdit(IDC_ST_DY, L"", se);
+        g_stEp1 = mkEdit(IDC_ST_EP1, L"", se);
+        g_stDur1 = mkEdit(IDC_ST_DUR1, L"", se);
+        g_stT2  = mkEdit(IDC_ST_TITLE2, L"", se);
+        g_stEp2 = mkEdit(IDC_ST_EP2, L"", se);
+        g_stDur2 = mkEdit(IDC_ST_DUR2, L"", se);
+        g_stSpecial = mkEdit(IDC_ST_SPECIAL, L"", se);
+        g_stScan = mkBtn(IDC_ST_BTN_SCAN, L"统计信息", WS_CHILD | WS_TABSTOP | BS_OWNERDRAW);
+        g_stCopy = mkBtn(IDC_ST_BTN_COPY, L"复制文案", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON);
+        g_stReport = mkEdit(IDC_ST_REPORT, L"",
+            WS_CHILD | WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL);
+
         HWND all[] = { g_hFolder, g_hBrowse, g_hTitle, g_hStart, g_hPad, g_hSub,
                        g_hSort, g_hTag, g_hCustom, g_hColon, g_hList, g_hPreview,
                        g_hRename, g_hUndo, g_hTitles, g_hOpen, g_hGuess, g_hAuto,
-                       g_hKeepEp, g_hHelp, g_hDuration };
+                       g_hKeepEp, g_hHelp, g_hDuration,
+                       g_stF1, g_stB1, g_stF2, g_stB2, g_stT1, g_stDy, g_stEp1,
+                       g_stDur1, g_stT2, g_stEp2, g_stDur2, g_stSpecial, g_stScan,
+                       g_stCopy, g_stReport };
         for (HWND h : all) SendMessageW(h, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
         SendMessageW(g_hStatus, WM_SETFONT, (WPARAM)g_fontSub, TRUE);
 
@@ -1582,9 +1996,23 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         GetClientRect(hwnd, &rc);
         FillRect(hdc, &rc, g_brBack);
         DrawHeader(hdc, rc);
-        DrawLabels(hdc, hwnd);
+        DrawTabs(hdc, rc);
+        if (g_page == 0) DrawLabels(hdc, hwnd);
+        else             DrawStatsLabels(hdc, hwnd);
         EndPaint(hwnd, &ps);
         return 0;
+    }
+
+    case WM_LBUTTONDOWN: {
+        POINT pt = { (int)(short)LOWORD(lp), (int)(short)HIWORD(lp) };
+        for (int i = 0; i < 2; ++i) {
+            RECT r = TabRect(i);
+            if (PtInRect(&r, pt)) {
+                if (g_page != i) ShowPage(hwnd, i);
+                return 0;
+            }
+        }
+        break;
     }
 
     case WM_CTLCOLORSTATIC: {
@@ -1598,7 +2026,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_DRAWITEM: {
         DRAWITEMSTRUCT* di = (DRAWITEMSTRUCT*)lp;
-        if (di->CtlID == IDC_BTN_RENAME) {
+        if (di->CtlID == IDC_BTN_RENAME || di->CtlID == IDC_ST_BTN_SCAN) {
             bool pressed = (di->itemState & ODS_SELECTED) != 0;
             COLORREF bg = pressed ? RGB(29, 78, 216) : RGB(37, 99, 235);
             HBRUSH br = CreateSolidBrush(bg);
@@ -1616,7 +2044,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SetTextColor(di->hDC, RGB(255, 255, 255));
             HFONT oldF = (HFONT)SelectObject(di->hDC, g_fontBtn);
             RECT r = di->rcItem;
-            DrawTextW(di->hDC, L"执行改名", -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(di->hDC,
+                      di->CtlID == IDC_BTN_RENAME ? L"执行改名" : L"统计信息",
+                      -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             SelectObject(di->hDC, oldF);
             return TRUE;
         }
@@ -1786,6 +2216,41 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case IDC_BTN_DURATION:
             DoCountDuration();
+            return 0;
+        case IDC_ST_BROWSE1:
+        case IDC_ST_BROWSE2: {
+            std::wstring f;
+            if (PickFolder(f)) {
+                bool first = (id == IDC_ST_BROWSE1);
+                SetWindowTextW(first ? g_stF1 : g_stF2, f.c_str());
+                GuessInto(first ? g_stT1 : g_stT2, f);
+                UpdateReport();
+            }
+            return 0;
+        }
+        case IDC_ST_BTN_SCAN:
+            DoScanStats();
+            return 0;
+        case IDC_ST_BTN_COPY: {
+            std::wstring t = GetText(g_stReport);
+            if (Trim(t).empty()) {
+                MessageBoxW(hwnd, L"还没有可复制的文案，先选文件夹并点「统计信息」。",
+                            L"复制文案", MB_ICONWARNING);
+                return 0;
+            }
+            CopyToClipboard(t);
+            SetStatus(L"报送文案已复制到剪贴板，可直接粘贴");
+            return 0;
+        }
+        case IDC_ST_TITLE1:
+        case IDC_ST_DY:
+        case IDC_ST_EP1:
+        case IDC_ST_DUR1:
+        case IDC_ST_TITLE2:
+        case IDC_ST_EP2:
+        case IDC_ST_DUR2:
+        case IDC_ST_SPECIAL:
+            if (code == EN_CHANGE && !g_suppress) UpdateReport();
             return 0;
         case IDC_BTN_HELP:
             ShowTutorial(hwnd);
@@ -2038,6 +2503,39 @@ static int RunSelfTest() {
     CHECK(MoveFailReason(ERROR_ACCESS_DENIED).find(L"权限") != std::wstring::npos,
           L"权限 -> " + MoveFailReason(ERROR_ACCESS_DENIED));
     CHECK(MoveFailReason(1234) == L"系统错误 1234", L"未知码 -> " + MoveFailReason(1234));
+
+    // ---- 9. 剧集统计与报送文案
+    LOGW(L"\n[9] 剧集统计与报送文案\n");
+    CHECK(FmtClock(2725) == L"45:25", L"2725 秒 -> " + FmtClock(2725));
+    CHECK(FmtClock(3725) == L"1:02:05", L"3725 秒 -> " + FmtClock(3725));
+    CHECK(FmtClock(0) == L"0:00", L"0 秒 -> " + FmtClock(0));
+
+    std::vector<double> secs(54, 0.0);
+    std::vector<int> eps;
+    for (int i = 0; i < 54; ++i) {
+        eps.push_back(i + 1);
+        secs[i] = (i % 2) ? 59.4 : 40.1;
+    }
+    secs[0] = 61.0; secs[25] = 62.0; secs[47] = 61.5;   // 第 1、26、48 集满 1 分钟
+    std::wstring sp = BuildSpecialText(54, secs, eps);
+    CHECK(sp == L"剧集共54集，其中第1、26、48集满1分钟，其余51集均不满一分钟，为40-60秒之间",
+          L"特殊情况: " + sp);
+    CHECK(BuildSpecialText(2, { 61.0, 65.0 }, { 1, 2 }) == L"剧集共2集，均满1分钟",
+          L"全部满 1 分钟");
+    CHECK(BuildSpecialText(2, { 40.0, 50.0 }, { 1, 2 }) == L"剧集共2集，均为40-50秒",
+          L"全部不满 1 分钟");
+    CHECK(BuildSpecialText(0, {}, {}) == L"", L"没有剧集时为空");
+
+    std::wstring rep = ComposeReport(
+        L"顾总裁的烟火厨娘", L"顾宅烟火遇真心", L"54", L"45:25",
+        L"8 Bowls of Fried Rice for 800 Million", L"54", L"46:23", sp);
+    std::wstring want = L"原剧:\r\n顾总裁的烟火厨娘（dy：顾宅烟火遇真心）\r\n集数: 54\r\n时长: 45:25\r\n\r\n"
+                        L"海外转译后:\r\n8 Bowls of Fried Rice for 800 Million\r\n集数: 54\r\n时长: 46:23\r\n"
+                        L"特殊情况: " + sp;
+    CHECK(rep == want, L"报送文案格式");
+    CHECK(ComposeReport(L"", L"", L"", L"", L"", L"", L"", L"") == L"", L"空字段时文案为空");
+    CHECK(ComposeReport(L"剧", L"", L"10", L"", L"", L"", L"", L"") == L"原剧:\r\n剧\r\n集数: 10",
+          L"只有原剧信息");
 
     LOGW(L"\n=== 结果：%ls（失败 %d 项）===\n",
         g_fail == 0 ? L"全部通过" : L"存在失败", g_fail);
