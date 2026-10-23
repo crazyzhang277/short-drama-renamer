@@ -19,7 +19,6 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
-#include <ctime>
 #include <cwctype>
 #include <cwchar>
 #include <cstdlib>
@@ -30,8 +29,16 @@
 #include <cmath>
 #include <io.h>
 #include <fcntl.h>
+#include <atomic>
+#include <memory>
+#include <thread>
+#include <functional>
+#include "renamer_core.h"
+#include "renamer_media.h"
+#include "renamer_ops.h"
 
 namespace fs = std::filesystem;
+using namespace renamer;
 
 // ------------------------------------------------------------------ 控件 ID
 enum {
@@ -62,10 +69,11 @@ enum {
     // 剧集统计页
     IDC_ST_FOLDER1,
     IDC_ST_BROWSE1,
+    IDC_ST_GUESS1,
     IDC_ST_FOLDER2,
     IDC_ST_BROWSE2,
+    IDC_ST_GUESS2,
     IDC_ST_TITLE1,
-    IDC_ST_DY,
     IDC_ST_EP1,
     IDC_ST_DUR1,
     IDC_ST_TITLE2,
@@ -78,6 +86,8 @@ enum {
 };
 
 static const UINT_PTR IDT_REFRESH = 1;   // 自动刷新的防抖定时器
+static const UINT WM_MEDIA_PROGRESS = WM_APP + 1;
+static const UINT WM_MEDIA_COMPLETE = WM_APP + 2;
 
 // ------------------------------------------------------------------ 全局
 static HINSTANCE g_hInst;
@@ -86,8 +96,9 @@ static HWND  g_hMain, g_hFolder, g_hBrowse, g_hList, g_hTitle, g_hStart, g_hPad,
              g_hUndo, g_hTitles, g_hOpen, g_hSub, g_hStatus, g_hGuess, g_hAuto,
              g_hHelp, g_hKeepEp, g_hDuration;
 // 剧集统计页控件
-static HWND  g_stF1, g_stB1, g_stF2, g_stB2, g_stT1, g_stDy, g_stEp1, g_stDur1,
+static HWND  g_stF1, g_stB1, g_stG1, g_stF2, g_stB2, g_stG2, g_stT1, g_stEp1, g_stDur1,
              g_stT2, g_stEp2, g_stDur2, g_stSpecial, g_stScan, g_stCopy, g_stReport;
+static bool g_stT1Auto = false, g_stT2Auto = false;
 static int   g_page = 0;          // 0 = 批量改名，1 = 剧集统计
 static HFONT g_fontUI, g_fontTitle, g_fontSub, g_fontBtn;
 static HBRUSH g_brBack;
@@ -121,70 +132,55 @@ static const TagDef kTags[] = {
 static const int kTagCount = (int)(sizeof(kTags) / sizeof(kTags[0]));
 
 // ------------------------------------------------------------------ 计划
-struct PlanItem {
-    fs::path     src;
-    std::wstring oldName;
-    std::wstring newName;
-    long         ep = 0;
-    int          score = -1;
-    bool         dup = false;   // 与别的文件算出了同一个新名
-};
+
 static std::vector<PlanItem> g_plan;
 static bool g_previewed = false;
 static bool g_titleAuto = false;   // 剧名当前是否由「自动识别」填入
 static bool g_suppress = false;    // 抑制程序化设置控件引发的自动刷新
 
+enum class MediaTaskKind { Duration, DramaStats };
+struct MediaTaskResult {
+    MediaTaskKind kind = MediaTaskKind::Duration;
+    std::wstring error;
+    std::wstring error2;
+    bool ok1 = false;
+    bool ok2 = false;
+    bool sameFolders = false;
+    bool cancelled = false;
+    DramaScan scan1;
+    DramaScan scan2;
+    int fileCount = 0;
+    int readableCount = 0;
+    long totalSeconds = 0;
+    std::vector<std::wstring> unreadableFiles;
+};
+struct MediaProgressMessage {
+    size_t current = 0;
+    size_t total = 0;
+    std::wstring label;
+};
+
+static std::atomic<bool> g_mediaCancel{false};
+static std::thread g_mediaThread;
+static bool g_mediaTaskActive = false;
+static bool g_closeAfterMediaTask = false;
+static MediaTaskKind g_mediaTaskKind = MediaTaskKind::Duration;
+static std::vector<std::pair<HWND, BOOL>> g_mediaControlStates;
+
 // ------------------------------------------------------------------ 基础工具
-static std::wstring Trim(const std::wstring& s) {
-    size_t a = s.find_first_not_of(L" \t\r\n");
-    if (a == std::wstring::npos) return L"";
-    size_t b = s.find_last_not_of(L" \t\r\n");
-    return s.substr(a, b - a + 1);
-}
-
-static std::string W2U8(const std::wstring& w) {
-    if (w.empty()) return std::string();
-    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
-    std::string s((size_t)n, 0);
-    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &s[0], n, nullptr, nullptr);
-    return s;
-}
-
-static std::wstring U82W(const std::string& s) {
-    if (s.empty()) return std::wstring();
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
-    std::wstring w((size_t)n, 0);
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &w[0], n);
-    return w;
-}
-
-static std::wstring LowerExt(const fs::path& p) {
-    std::wstring e = p.extension().wstring();
-    for (auto& c : e) c = (wchar_t)towlower(c);
-    return e;
-}
-
-static bool IsVideoExt(const std::wstring& ext) {
-    static const wchar_t* exts[] = {
-        L".mp4", L".mkv", L".mov", L".avi", L".wmv", L".flv", L".m4v",
-        L".ts",  L".webm", L".mpg", L".mpeg", L".rmvb", L".rm", L".3gp",
-        L".m2ts", L".vob", L".ogv", L".divx", L".asf", L".f4v"
-    };
-    for (auto e : exts) if (ext == e) return true;
-    return false;
-}
-
 static std::wstring ExeDir() {
-    wchar_t buf[MAX_PATH] = {0};
-    GetModuleFileNameW(nullptr, buf, MAX_PATH);
-    return fs::path(buf).parent_path().wstring();
+    std::vector<wchar_t> buf(32768, L'\0');
+    DWORD n = GetModuleFileNameW(nullptr, buf.data(), (DWORD)buf.size());
+    if (n == 0 || n >= buf.size()) return fs::current_path().wstring();
+    return fs::path(buf.data()).parent_path().wstring();
 }
 
 static std::wstring GetText(HWND h) {
     int n = GetWindowTextLengthW(h);
     if (n <= 0) return L"";
-    std::wstring s((size_t)n, L'\0');
-    GetWindowTextW(h, &s[0], n + 1);
+    std::wstring s((size_t)n + 1, L'\0');
+    int copied = GetWindowTextW(h, &s[0], n + 1);
+    s.resize((size_t)copied);
     return s;
 }
 
@@ -193,324 +189,90 @@ static void SetStatus(const std::wstring& s) {
     UpdateWindow(g_hStatus);
 }
 
-static std::wstring NowStamp() {
-    time_t t = time(nullptr);
-    struct tm tmv;
-    memset(&tmv, 0, sizeof(tmv));
-    struct tm* lt = localtime(&t);
-    if (lt) tmv = *lt;
-    wchar_t buf[64] = {0};
-    wcsftime(buf, 64, L"%Y%m%d-%H%M%S", &tmv);
-    return buf;
+static void SetMediaControlsBusy(bool busy, MediaTaskKind kind) {
+    if (busy) {
+        g_mediaControlStates.clear();
+        std::vector<HWND> controls = { g_hFolder, g_hBrowse, g_hSub, g_hPreview,
+                                       g_hRename, g_hUndo, g_hTitles, g_hOpen,
+                                       g_hDuration, g_stScan };
+        if (kind == MediaTaskKind::DramaStats) {
+            controls.insert(controls.end(), { g_stF1, g_stB1, g_stG1, g_stF2, g_stB2, g_stG2, g_stT1,
+                                              g_stEp1, g_stDur1, g_stT2, g_stEp2, g_stDur2,
+                                              g_stSpecial, g_stCopy });
+        }
+        for (HWND control : controls) {
+            if (!control || !IsWindow(control)) continue;
+            g_mediaControlStates.push_back({ control, IsWindowEnabled(control) });
+            EnableWindow(control, FALSE);
+        }
+    } else {
+        for (const auto& state : g_mediaControlStates)
+            if (state.first && IsWindow(state.first)) EnableWindow(state.first, state.second);
+        g_mediaControlStates.clear();
+    }
+}
+
+static bool StartMediaTask(MediaTaskKind kind,
+                           std::function<void(MediaTaskResult&, const std::atomic<bool>&)> work) {
+    if (g_mediaTaskActive) return false;
+    g_mediaCancel.store(false);
+    g_mediaTaskActive = true;
+    g_closeAfterMediaTask = false;
+    g_mediaTaskKind = kind;
+    SetMediaControlsBusy(true, kind);
+    SetStatus(kind == MediaTaskKind::Duration ? L"正在后台统计视频时长…" : L"正在后台统计剧集信息…");
+    try {
+        g_mediaThread = std::thread([kind, work = std::move(work)]() mutable {
+            auto result = std::make_unique<MediaTaskResult>();
+            result->kind = kind;
+            HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            if (FAILED(co)) {
+                result->error = L"后台线程初始化 COM 失败（系统错误 " +
+                                std::to_wstring((unsigned long)co) + L"）。";
+                result->error2 = result->error;
+            } else {
+                HRESULT mf = MFStartup(MF_VERSION, MFSTARTUP_FULL);
+                if (FAILED(mf)) {
+                    result->error = L"后台线程初始化 Media Foundation 失败（系统错误 " +
+                                    std::to_wstring((unsigned long)mf) + L"）。";
+                    result->error2 = result->error;
+                } else {
+                    try {
+                        work(*result, g_mediaCancel);
+                    } catch (...) {
+                        result->error = L"统计过程中发生异常。";
+                    }
+                    MFShutdown();
+                }
+                CoUninitialize();
+            }
+            result->cancelled = g_mediaCancel.load();
+            if (!PostMessageW(g_hMain, WM_MEDIA_COMPLETE, 0, (LPARAM)result.get())) return;
+            result.release();
+        });
+    } catch (...) {
+        g_mediaTaskActive = false;
+        SetMediaControlsBusy(false, kind);
+        SetStatus(L"无法启动后台统计线程。");
+        return false;
+    }
+    return true;
+}
+
+static void PostMediaProgress(size_t current, size_t total, const wchar_t* label = L"") {
+    auto* progress = new MediaProgressMessage{ current, total, label };
+    if (!PostMessageW(g_hMain, WM_MEDIA_PROGRESS, 0, (LPARAM)progress)) delete progress;
 }
 
 // ------------------------------------------------------------------ 集数识别
-static bool IsBadNumber(const std::wstring& s) {
-    static const wchar_t* bad[] = {
-        L"240", L"360", L"480", L"576", L"720", L"1080", L"1280",
-        L"1440", L"1920", L"2160", L"4320", L"264", L"265"
-    };
-    for (auto b : bad) if (s == b) return true;
-    if (s.size() == 4) {
-        int v = _wtoi(s.c_str());
-        if (v >= 1900 && v <= 2099) return true;
-    }
-    return false;
-}
-
-struct EpResult { long ep = 0; int score = -1; };
-
-static EpResult ParseEpisode(const std::wstring& raw) {
-    std::wstring name = raw;
-    size_t dot = name.find_last_of(L'.');
-    if (dot != std::wstring::npos && dot > 0) name = name.substr(0, dot);
-
-    EpResult best;
-
-    auto tryPat = [&](const wchar_t* pat, int score, bool filterBad) {
-        try {
-            std::wregex re(pat, std::regex_constants::icase);
-            std::wsregex_iterator it(name.begin(), name.end(), re), end;
-            long val = -1;
-            for (; it != end; ++it) {
-                if (it->size() < 2) continue;
-                std::wstring g = (*it)[1].str();
-                if (filterBad && IsBadNumber(g)) continue;
-                long v = _wtoi(g.c_str());
-                if (v <= 0) continue;
-                val = v;   // 取最右匹配
-            }
-            if (val > 0 && score > best.score) { best.ep = val; best.score = score; }
-        } catch (...) {}
-    };
-
-    // S01E05 / S01.E05 / s1e5
-    try {
-        std::wregex re(L"[Ss]\\d{1,2}[\\s._-]*[Ee][Pp]?\\s*(\\d{1,4})", std::regex_constants::icase);
-        std::wsmatch m;
-        if (std::regex_search(name, m, re) && m.size() > 1) {
-            long v = _wtoi(m[1].str().c_str());
-            if (v > 0 && best.score < 120) { best.ep = v; best.score = 120; }
-        }
-    } catch (...) {}
-
-    tryPat(L"第\\s*(\\d{1,4})\\s*[集话話期]", 130, false);
-    tryPat(L"(\\d{1,4})\\s*[集话話]",        125, false);
-    tryPat(L"(?:^|[^A-Za-z])[Ee][Pp][\\s._-]*(\\d{1,4})", 110, true);
-    tryPat(L"[\\[\\(（【]\\s*(\\d{1,4})\\s*[\\]\\)）】]",   80, true);
-    tryPat(L"(?:^|[^\\d])(\\d{1,4})\\s*$",                60, true);
-    tryPat(L"^\\s*(\\d{1,4})(?:[^\\d]|$)",                50, true);
-
-    return best;
-}
-
 // ------------------------------------------------------------------ 自然排序
-static int NaturalCompare(const std::wstring& a, const std::wstring& b) {
-    size_t i = 0, j = 0;
-    while (i < a.size() && j < b.size()) {
-        if (iswdigit(a[i]) && iswdigit(b[j])) {
-            size_t i2 = i, j2 = j;
-            while (i2 < a.size() && iswdigit(a[i2])) i2++;
-            while (j2 < b.size() && iswdigit(b[j2])) j2++;
-            std::wstring na = a.substr(i, i2 - i), nb = b.substr(j, j2 - j);
-            size_t p = na.find_first_not_of(L'0');
-            std::wstring ta = (p == std::wstring::npos) ? L"0" : na.substr(p);
-            p = nb.find_first_not_of(L'0');
-            std::wstring tb = (p == std::wstring::npos) ? L"0" : nb.substr(p);
-            if (ta.size() != tb.size()) return ta.size() < tb.size() ? -1 : 1;
-            int c = ta.compare(tb);
-            if (c) return c < 0 ? -1 : 1;
-            if (na.size() != nb.size()) return na.size() < nb.size() ? -1 : 1;
-            i = i2; j = j2;
-        } else {
-            wchar_t ca = (wchar_t)towlower(a[i]), cb = (wchar_t)towlower(b[j]);
-            if (ca != cb) return ca < cb ? -1 : 1;
-            i++; j++;
-        }
-    }
-    if (i < a.size()) return 1;
-    if (j < b.size()) return -1;
-    return 0;
-}
-
 // ------------------------------------------------------------------ 剧名清洗
-static std::wstring NormalizePunct(const std::wstring& in) {
-    std::wstring out;
-    out.reserve(in.size());
-    for (size_t i = 0; i < in.size(); ++i) {
-        wchar_t c = in[i];
-        switch (c) {
-            case L'，': case L'、': out += L','; break;
-            case L'。': out += L'.'; break;
-            case L'：': out += L':'; break;
-            case L'；': out += L';'; break;
-            case L'！': out += L'!'; break;
-            case L'？': out += L'?'; break;
-            case L'（': out += L'('; break;
-            case L'）': out += L')'; break;
-            case L'【': out += L'['; break;
-            case L'】': out += L']'; break;
-            case L'‘': case L'’': case L'＇': out += L'\''; break;
-            case L'“': case L'”': case L'＂': out += L'"'; break;
-            case L'－': case L'—': case L'–': case L'﹣': out += L'-'; break;
-            case L'　': out += L' '; break;
-            default: out += c;
-        }
-    }
-    std::wstring res;
-    bool sp = false;
-    for (wchar_t c : out) {
-        if (c == L' ') { if (!sp) res += L' '; sp = true; }
-        else { res += c; sp = false; }
-    }
-    return Trim(res);
-}
-
-static std::wstring SanitizeForFile(const std::wstring& in) {
-    std::wstring out;
-    for (wchar_t c : in) {
-        if (c < 32) continue;
-        if (c == L'<' || c == L'>' || c == L'/' || c == L'\\' || c == L'|' ||
-            c == L'?' || c == L'*' || c == L'"') continue;
-        out += c;
-    }
-    while (!out.empty() && (out.back() == L'.' || out.back() == L' ')) out.pop_back();
-    return out;
-}
-
-static std::wstring CollapseSpaces(const std::wstring& in) {
-    std::wstring out;
-    out.reserve(in.size());
-    bool sp = false;
-    for (wchar_t c : in) {
-        if (c == L' ') { if (!sp) out += L' '; sp = true; }
-        else { out += c; sp = false; }
-    }
-    return Trim(out);
-}
-
-static std::wstring ApplyColon(const std::wstring& s, int mode) {
-    std::wstring out;
-    for (wchar_t c : s) {
-        if (c == L':') {
-            if (mode == 0)      out += L'：';
-            else if (mode == 1) out += L" - ";
-            else                out += L' ';
-        } else out += c;
-    }
-    return CollapseSpaces(out);
-}
-
 // ------------------------------------------------------------------ 从文件夹名猜剧名
-static bool HasCJK(const std::wstring& s) {
-    for (wchar_t c : s) if (c >= 0x4E00 && c <= 0x9FFF) return true;
-    return false;
-}
-
-static bool EqualsNoCase(const std::wstring& a, const wchar_t* b) {
-    return _wcsicmp(a.c_str(), b) == 0;
-}
-
 // 这些是"容器目录"名字，不是剧名：盘符、系统目录、常用中文归类目录、本工具目录
-static bool IsNoiseSegment(const std::wstring& raw) {
-    std::wstring s = Trim(raw);
-    if (s.empty()) return true;
-    if (s.size() == 2 && s[1] == L':') return true;            // C:  D:
-    while (!s.empty() && (s.back() == L'\\' || s.back() == L'/' || s.back() == L':'))
-        s.pop_back();
-    s = Trim(s);
-    if (s.empty()) return true;
-
-    static const wchar_t* kNoise[] = {
-        L"users", L"user", L"public", L"documents", L"desktop", L"downloads",
-        L"videos", L"video", L"movies", L"movie", L"music", L"pictures", L"photos",
-        L"temp", L"tmp", L"appdata", L"local", L"locallow", L"roaming",
-        L"program files", L"program files (x86)", L"programdata", L"windows",
-        L"system32", L"onedrive", L"library", L"home", L"root", L"disk",
-        L"new folder", L"new folder (2)", L"untitled", L"output", L"out",
-        L"新建文件夹", L"未命名", L"未命名文件夹", L"我的视频", L"我的文档",
-        L"视频", L"影片", L"影视", L"短剧", L"短剧视频", L"剧集", L"合集",
-        L"下载", L"桌面", L"文档", L"图片", L"音乐", L"收藏夹",
-        L"待处理", L"待更名", L"待整理", L"素材", L"资源", L"临时",
-        L"自动更名工具", L"更名工具", L"短剧更名", L"短剧更名工具",
-    };
-    for (auto n : kNoise) if (EqualsNoCase(s, n)) return true;
-
-    // 纯数字 / 纯符号 / 太短没意义（如 "1"、"S01"、"v2"）
-    bool hasAlpha = false, cjk = false;
-    for (wchar_t c : s) {
-        if (iswalpha(c)) {
-            hasAlpha = true;
-            if (c >= 0x4E00 && c <= 0x9FFF) cjk = true;
-        }
-    }
-    if (!hasAlpha) return true;
-    if (!cjk && s.size() <= 3) return true;
-    return false;
-}
-
 // 单词首字母大写；全大写且很短的词（CEO / TV / FBI）保持原样
-static std::wstring TitleCaseWords(const std::wstring& s) {
-    std::wstring out;
-    size_t i = 0;
-    while (i < s.size()) {
-        size_t j = s.find(L' ', i);
-        if (j == std::wstring::npos) j = s.size();
-        std::wstring w = s.substr(i, j - i);
-        bool allUpper = true, hasAlpha = false;
-        for (wchar_t c : w) {
-            if (iswalpha(c)) { hasAlpha = true; if (!iswupper(c)) allUpper = false; }
-        }
-        if (hasAlpha && !(allUpper && w.size() <= 4)) {
-            bool first = true;
-            for (auto& c : w) {
-                if (iswalpha(c)) {
-                    c = first ? (wchar_t)towupper(c) : (wchar_t)towlower(c);
-                    first = false;
-                }
-            }
-        }
-        out += w;
-        if (j < s.size()) out += L' ';
-        i = j + 1;
-    }
-    return out;
-}
-
 // "the_lost-HEIRESS.of time" -> "The Lost Heiress Of Time"
-static std::wstring FolderNameToTitle(const std::wstring& raw) {
-    std::wstring s;
-    s.reserve(raw.size());
-    for (wchar_t c : raw) {
-        if (c == L'_' || c == L'.' || c == L'-' || c == L'　') s += L' ';
-        else s += c;
-    }
-    s = CollapseSpaces(s);
-    if (HasCJK(s)) return s;          // 中文名原样保留
-    return TitleCaseWords(s);
-}
-
 // 从文件夹路径里由深到浅找第一个"像剧名"的目录名；盘符和系统目录一律跳过
-static std::wstring GuessTitleFromFolder(const std::wstring& folder) {
-    if (Trim(folder).empty()) return L"";
-    std::error_code ec;
-    fs::path p(folder);
-    std::vector<std::wstring> segs;
-    for (auto& part : p) {
-        std::wstring s = part.wstring();
-        if (!s.empty()) segs.push_back(s);
-    }
-    for (auto it = segs.rbegin(); it != segs.rend(); ++it) {
-        if (IsNoiseSegment(*it)) continue;
-        std::wstring t = FolderNameToTitle(Trim(*it));
-        if (!t.empty()) return t;
-    }
-    return L"";
-}
-
-static std::wstring BuildNewName(const std::wstring& titleRaw, long num, int pad,
-                                 const std::wstring& typeTag, int colonMode,
-                                 const std::wstring& ext) {
-    std::wstring title = NormalizePunct(Trim(titleRaw));
-    title = ApplyColon(title, colonMode);
-
-    wchar_t numbuf[32] = {0};
-    if (pad > 0) swprintf(numbuf, 32, L"%0*ld", pad, num);
-    else         swprintf(numbuf, 32, L"%ld", num);
-
-    std::wstring name = title + L" - " + numbuf
-                      + L" #short drama #mini drama #micro drama";
-    if (!typeTag.empty()) name += L" #" + typeTag;
-    name = SanitizeForFile(name);
-    if (name.size() > 170) name = name.substr(0, 170);
-    return name + ext;
-}
-
 // ------------------------------------------------------------------ 枚举
-static void CollectFiles(const fs::path& dir, bool sub, std::vector<fs::path>& out) {
-    std::error_code ec;
-    if (sub) {
-        fs::recursive_directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end;
-        for (; it != end; it.increment(ec)) {
-            if (ec) break;
-            std::error_code e2;
-            if (!it->is_regular_file(e2)) continue;
-            fs::path p = it->path();
-            if (p.filename() == L".rename-tool") continue;
-            if (IsVideoExt(LowerExt(p))) out.push_back(p);
-        }
-    } else {
-        fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end;
-        for (; it != end; it.increment(ec)) {
-            if (ec) break;
-            std::error_code e2;
-            if (!it->is_regular_file(e2)) continue;
-            fs::path p = it->path();
-            if (IsVideoExt(LowerExt(p))) out.push_back(p);
-        }
-    }
-}
-
 // ------------------------------------------------------------------ ListView
 static void ListAddRow(int idx, const std::wstring& a, const std::wstring& b, const std::wstring& c,
                        bool dup = false) {
@@ -571,84 +333,6 @@ static int SortMode() {
 }
 
 // ------------------------------------------------------------------ 生成计划（纯逻辑，不依赖界面）
-static bool MakePlan(const std::wstring& folder, const std::wstring& titleRaw,
-                     long start, int pad, const std::wstring& tag, int cm,
-                     int mode, bool sub, bool keepEp,
-                     std::vector<PlanItem>& items, std::wstring& err) {
-    items.clear();
-
-    if (folder.empty()) { err = L"请先选择视频文件夹。"; return false; }
-    std::error_code ec;
-    if (!fs::is_directory(folder, ec)) { err = L"文件夹不存在：\n" + folder; return false; }
-
-    std::wstring title = Trim(titleRaw);
-    if (title.empty()) { err = L"请输入剧名。"; return false; }
-
-    if (start <= 0) start = 1;
-    if (pad < 0) pad = 0;
-    if (pad > 4) pad = 4;
-
-    std::vector<fs::path> files;
-    CollectFiles(fs::path(folder), sub, files);
-    if (files.empty()) { err = L"该文件夹里没有找到视频文件。"; return false; }
-
-    items.reserve(files.size());
-    for (auto& f : files) {
-        PlanItem pi;
-        pi.src = f;
-        pi.oldName = f.filename().wstring();
-        EpResult r = ParseEpisode(pi.oldName);
-        pi.ep = r.ep;
-        pi.score = r.score;
-        items.push_back(pi);
-    }
-
-    if (mode == 2) {
-        std::sort(items.begin(), items.end(), [](const PlanItem& a, const PlanItem& b) {
-            std::error_code e1, e2;
-            auto ta = fs::last_write_time(a.src, e1);
-            auto tb = fs::last_write_time(b.src, e2);
-            if (e1 || e2) return NaturalCompare(a.oldName, b.oldName) < 0;
-            if (ta != tb) return ta < tb;
-            return NaturalCompare(a.oldName, b.oldName) < 0;
-        });
-    } else {
-        size_t recognized = 0;
-        for (auto& it : items) if (it.score >= 0) recognized++;
-        bool useEp = (mode == 0) && !items.empty()
-                   && (recognized * 10 >= items.size() * 6);
-        if (useEp) {
-            std::sort(items.begin(), items.end(), [](const PlanItem& a, const PlanItem& b) {
-                if (a.ep != b.ep) return a.ep < b.ep;
-                if (a.score != b.score) return a.score > b.score;
-                return NaturalCompare(a.oldName, b.oldName) < 0;
-            });
-        } else {
-            std::sort(items.begin(), items.end(), [](const PlanItem& a, const PlanItem& b) {
-                return NaturalCompare(a.oldName, b.oldName) < 0;
-            });
-        }
-    }
-
-    long n = start;
-    for (auto& it : items) {
-        // 默认：按位置连续编号（断档会被自动接上）
-        // keepEp：沿用从文件名里识别出的原集数（断档保留），认不出时才退回连续编号
-        long num = n;
-        if (keepEp && it.ep > 0) num = it.ep;
-        it.newName = BuildNewName(title, num, pad, tag, cm, it.src.extension().wstring());
-        n++;
-    }
-
-    // 标出重名：两个文件算出了同一个新名（多见于「沿用原集数」时 EP08 与 第8集 撞车）
-    for (size_t i = 0; i < items.size(); ++i)
-        for (size_t j = i + 1; j < items.size(); ++j)
-            if (_wcsicmp(items[i].newName.c_str(), items[j].newName.c_str()) == 0)
-                items[i].dup = items[j].dup = true;
-
-    return true;
-}
-
 // ------------------------------------------------------------------ 生成计划（界面）
 static bool BuildPlan(std::wstring& err) {
     g_plan.clear();
@@ -672,7 +356,7 @@ static bool BuildPlan(std::wstring& err) {
     int row = 0;
     int dupCount = 0;
     for (auto& it : g_plan) {
-        ListAddRow(row, std::to_wstring(row + 1), it.oldName, it.newName, it.dup);
+        ListAddRow(row, std::to_wstring(row + 1), it.displayName, it.newName, it.dup);
         if (it.dup) dupCount++;
         row++;
     }
@@ -704,7 +388,7 @@ static bool AutoRefreshOn() {
 static void SyncTitleFromFolder() {
     if (!g_titleAuto) return;
     std::wstring folder = Trim(GetText(g_hFolder));
-    std::wstring t = GuessTitleFromFolder(folder);
+    std::wstring t = GuessDramaNamesFromFolder(folder).title;
     if (t.empty()) return;
     if (Trim(GetText(g_hTitle)) == t) return;
     g_suppress = true;
@@ -751,174 +435,67 @@ static void ScheduleRefresh() {
     SetTimer(g_hMain, IDT_REFRESH, 200, nullptr);
 }
 
-// ------------------------------------------------------------------ 撤销记录
-static bool SaveUndo(const fs::path& folder,
-                     const std::vector<std::pair<std::wstring, std::wstring>>& pairs,
-                     std::wstring& outPath, std::wstring& err) {
-    std::error_code ec;
-    fs::path d = folder / L".rename-tool";
-    fs::create_directories(d, ec);
-    if (ec) { err = L"无法创建 .rename-tool 目录"; return false; }
-
-    fs::path f = d / (std::wstring(L"undo-") + NowStamp() + L".txt");
-
-    std::string body;
-    body += "\xEF\xBB\xBF";
-    body += "# rename-tool undo v1\n";
-    body += "# folder\t" + W2U8(folder.wstring()) + "\n";
-    for (auto& p : pairs) body += W2U8(p.first) + "\t" + W2U8(p.second) + "\n";
-
-    std::ofstream ofs(f, std::ios::binary | std::ios::trunc);
-    if (!ofs) { err = L"无法写入撤销记录"; return false; }
-    ofs.write(body.data(), (std::streamsize)body.size());
-    ofs.close();
-    outPath = f.wstring();
-    return true;
-}
-
-// 把 Win32 错误码翻成能照着处理的一句话
 static std::wstring MoveFailReason(DWORD e) {
     switch (e) {
     case ERROR_SHARING_VIOLATION:
-    case ERROR_LOCK_VIOLATION:
-        return L"文件正被其他程序占用（播放器、网盘同步、杀毒扫描），关掉后再试";
-    case ERROR_ACCESS_DENIED:
-        return L"没有权限（文件夹只读，或被安全软件拦下）";
+    case ERROR_LOCK_VIOLATION: return L"文件正被其他程序占用";
+    case ERROR_ACCESS_DENIED: return L"没有权限";
     case ERROR_FILE_NOT_FOUND:
-    case ERROR_PATH_NOT_FOUND:
-        return L"文件已经不在了，可能刚被移走或改过名，点「预览」刷新后再试";
+    case ERROR_PATH_NOT_FOUND: return L"文件已经不在了";
     case ERROR_ALREADY_EXISTS:
-    case ERROR_FILE_EXISTS:
-        return L"目标文件已存在";
-    case ERROR_FILENAME_EXCED_RANGE:
-        return L"路径太长（超过 260 个字符），把文件夹挪到更浅的位置";
-    default:
-        return L"系统错误 " + std::to_wstring(e);
+    case ERROR_FILE_EXISTS: return L"目标文件已存在";
+    case ERROR_FILENAME_EXCED_RANGE: return L"路径太长";
+    default: return L"系统错误 " + std::to_wstring(e);
     }
 }
 
 // ------------------------------------------------------------------ 执行改名
 static bool DoRename() {
     if (g_plan.empty()) return false;
-
     std::wstring folder = Trim(GetText(g_hFolder));
-    fs::path dir(folder);
-
-    // ---- 冲突检查
-    std::wstring conflicts;
-    int shown = 0;
-    for (size_t i = 0; i < g_plan.size(); ++i) {
-        if (g_plan[i].oldName == g_plan[i].newName) continue;
-
-        std::error_code ec;
-        if (fs::exists(dir / g_plan[i].newName, ec)) {
-            conflicts += L"目标已存在：" + g_plan[i].newName + L"\n";
-            if (++shown >= 8) break;
-        }
-        for (size_t j = i + 1; j < g_plan.size(); ++j) {
-            if (_wcsicmp(g_plan[i].newName.c_str(), g_plan[j].newName.c_str()) == 0) {
-                conflicts += L"新名重复：" + g_plan[i].newName + L"\n";
-                if (++shown >= 8) break;
-                break;
-            }
-        }
-        if (shown >= 8) break;
-
-        if ((dir / g_plan[i].newName).wstring().size() > 250) {
-            conflicts += L"路径过长：" + g_plan[i].newName + L"\n";
-            if (++shown >= 8) break;
-        }
+    if (folder.empty()) {
+        MessageBoxW(g_hMain, L"请先选择文件夹。", L"提示", MB_ICONWARNING);
+        return false;
     }
-    if (!conflicts.empty()) {
-        if (shown >= 8) conflicts += L"...（仅显示前几条）\n";
-        MessageBoxW(g_hMain, (L"检测到冲突，已取消操作：\n\n" + conflicts).c_str(),
+    if (MessageBoxW(g_hMain,
+                    (L"即将重命名 " + std::to_wstring(g_plan.size()) + L" 个文件。\n\n确定执行？").c_str(),
+                    L"确认改名", MB_YESNO | MB_ICONQUESTION) != IDYES) {
+        return false;
+    }
+
+    OperationResult r = ExecuteRename(fs::path(folder), g_plan);
+    if (!r.ok) {
+        std::wstring message = r.message.empty() ? L"改名失败。" : r.message;
+        if (r.win32Error != ERROR_SUCCESS) {
+            message += L"\n\n原因：" + MoveFailReason(r.win32Error) + L"（系统错误 " +
+                       std::to_wstring(r.win32Error) + L"）";
+        }
+        MessageBoxW(g_hMain, message.c_str(),
                     L"无法改名", MB_ICONERROR);
         return false;
     }
 
-    std::wstring msg = L"即将重命名 " + std::to_wstring(g_plan.size())
-                     + L" 个文件。\n\n确定执行？";
-    if (MessageBoxW(g_hMain, msg.c_str(), L"确认改名",
-                    MB_YESNO | MB_ICONQUESTION) != IDYES) return false;
-
-    // ---- 直接改名；冲突检查已确保目标名不存在
-    struct Step { fs::path from, to; };
-    std::vector<Step> done;
-    std::wstring failMsg;
-    DWORD moveErr = 0;
-
-    auto doMove = [&](const fs::path& a, const fs::path& b) -> bool {
-        if (MoveFileExW(a.c_str(), b.c_str(), 0)) {
-            done.push_back({ a, b });
-            return true;
-        }
-        moveErr = GetLastError();
-        return false;
-    };
-
-    bool ok = true;
-    for (size_t i = 0; i < g_plan.size(); ++i) {
-        if (g_plan[i].oldName == g_plan[i].newName) continue;
-        fs::path from = dir / g_plan[i].oldName;
-        fs::path to = dir / g_plan[i].newName;
-        if (!doMove(from, to)) {
-            failMsg = L"无法重命名：" + g_plan[i].oldName + L"\n原因：" + MoveFailReason(moveErr);
-            ok = false;
-            break;
-        }
-    }
-
-    if (!ok) {
-        // 回滚
-        for (auto it = done.rbegin(); it != done.rend(); ++it) {
-            std::error_code ec;
-            if (fs::exists(it->from, ec)) continue;
-            MoveFileExW(it->to.c_str(), it->from.c_str(), 0);
-        }
-        MessageBoxW(g_hMain, (L"改名失败，已尽力回滚。\n\n" + failMsg).c_str(),
-                    L"错误", MB_ICONERROR);
-        return false;
-    }
-
-    // ---- 撤销记录
-    std::vector<std::pair<std::wstring, std::wstring>> pairs;
-    for (auto& it : g_plan) pairs.push_back({ it.newName, it.oldName });
-    std::wstring undoPath, err;
-    if (!SaveUndo(dir, pairs, undoPath, err))
-        MessageBoxW(g_hMain, (L"改名成功，但撤销记录写入失败：\n" + err).c_str(),
-                    L"提示", MB_ICONWARNING);
-
-    // ---- 标题清单（英文冒号版）
     std::wstring titles;
-    for (auto& it : g_plan) {
+    for (const auto& it : g_plan) {
         std::wstring t = it.newName;
         size_t dot = t.find_last_of(L'.');
-        if (dot != std::wstring::npos) t = t.substr(0, dot);
+        if (dot != std::wstring::npos) t.resize(dot);
         for (auto& c : t) if (c == L'：') c = L':';
         titles += t + L"\r\n";
     }
-    {
-        std::error_code ec;
-        fs::path d2 = dir / L".rename-tool";
-        fs::create_directories(d2, ec);
-        std::ofstream ofs(d2 / L"titles.txt", std::ios::binary | std::ios::trunc);
-        if (ofs) {
-            std::string b = "\xEF\xBB\xBF" + W2U8(titles);
-            ofs.write(b.data(), (std::streamsize)b.size());
-        }
+    std::wstring writeErr;
+    if (!WriteUtf8Atomic(fs::path(folder) / L".rename-tool" / L"titles.txt",
+                         "\xEF\xBB\xBF" + W2U8(titles), writeErr)) {
+        MessageBoxW(g_hMain, (L"改名成功，但标题清单写入失败：\n" + writeErr).c_str(),
+                    L"提示", MB_ICONWARNING);
     }
 
-    wchar_t buf[256] = {0};
-    swprintf(buf, 256, L"改名完成，共 %d 个文件", (int)g_plan.size());
-    SetStatus(buf);
-
-    std::wstring doneMsg =
-        L"改名完成！\n\n"
-        L"· 撤销记录：.rename-tool\\undo-*.txt\n"
-        L"· 标题清单：.rename-tool\\titles.txt\n\n"
-        L"如需还原，点「撤销上次」。";
+    InvalidateScanCache();
+    SetStatus(L"改名完成，共 " + std::to_wstring(r.changed) + L" 个文件");
+    std::wstring doneMsg = L"改名完成！\n\n";
+    if (!r.logPath.empty()) doneMsg += L"· 撤销记录：" + r.logPath.wstring() + L"\n";
+    doneMsg += L"· 标题清单：.rename-tool\\titles.txt\n\n如需还原，点「撤销上次」。";
     MessageBoxW(g_hMain, doneMsg.c_str(), L"成功", MB_ICONINFORMATION);
-
     PostMessageW(g_hMain, WM_COMMAND, IDC_BTN_PREVIEW, 0);
     return true;
 }
@@ -930,98 +507,29 @@ static bool DoUndo() {
         MessageBoxW(g_hMain, L"请先选择文件夹。", L"提示", MB_ICONWARNING);
         return false;
     }
-    fs::path d = fs::path(folder) / L".rename-tool";
-    std::error_code ec;
-    if (!fs::is_directory(d, ec)) {
-        MessageBoxW(g_hMain, L"该文件夹里没有撤销记录。", L"提示", MB_ICONWARNING);
+    if (MessageBoxW(g_hMain, L"将撤销最近一次改名并恢复原文件名。\n\n确定？",
+                    L"确认撤销", MB_YESNO | MB_ICONQUESTION) != IDYES) {
         return false;
     }
-
-    fs::path latest;
-    fs::file_time_type bestT{};
-    bool found = false;
-    for (auto& e : fs::directory_iterator(d, ec)) {
-        std::error_code e2;
-        if (!e.is_regular_file(e2)) continue;
-        std::wstring nm = e.path().filename().wstring();
-        if (nm.rfind(L"undo-", 0) != 0) continue;
-        auto t = fs::last_write_time(e.path(), e2);
-        if (!found || t > bestT) { bestT = t; latest = e.path(); found = true; }
-    }
-    if (!found) {
-        MessageBoxW(g_hMain, L"没有找到撤销记录。", L"提示", MB_ICONWARNING);
+    OperationResult r = UndoLatest(fs::path(folder));
+    if (!r.ok) {
+        std::wstring message = r.message.empty() ? L"撤销失败。" : r.message;
+        if (r.win32Error != ERROR_SUCCESS) {
+            message += L"\n\n原因：" + MoveFailReason(r.win32Error) + L"（系统错误 " +
+                       std::to_wstring(r.win32Error) + L"）";
+        }
+        MessageBoxW(g_hMain, message.c_str(),
+                    L"撤销", MB_ICONERROR);
         return false;
     }
-
-    std::ifstream ifs(latest, std::ios::binary);
-    if (!ifs) {
-        MessageBoxW(g_hMain, L"无法读取撤销记录。", L"错误", MB_ICONERROR);
-        return false;
-    }
-    std::string raw((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-    ifs.close();
-    if (raw.size() >= 3 && (unsigned char)raw[0] == 0xEF) raw = raw.substr(3);
-
-    std::wstring w = U82W(raw);
-    std::vector<std::pair<std::wstring, std::wstring>> pairs;
-    std::wistringstream ws(w);
-    std::wstring line;
-    while (std::getline(ws, line)) {
-        if (!line.empty() && line.back() == L'\r') line.pop_back();
-        if (line.empty() || line[0] == L'#') continue;
-        size_t tab = line.find(L'\t');
-        if (tab == std::wstring::npos) continue;
-        pairs.push_back({ line.substr(0, tab), line.substr(tab + 1) });
-    }
-    if (pairs.empty()) {
-        MessageBoxW(g_hMain, L"撤销记录为空。", L"提示", MB_ICONWARNING);
-        return false;
-    }
-
-    std::wstring q = L"将撤销 " + std::to_wstring(pairs.size())
-                   + L" 个文件的重命名，还原为原名。\n\n确定？";
-    if (MessageBoxW(g_hMain, q.c_str(), L"确认撤销",
-                    MB_YESNO | MB_ICONQUESTION) != IDYES) return false;
-
-    int ok = 0, fail = 0;
-    for (auto& p : pairs) {
-        fs::path from = fs::path(folder) / p.first;
-        fs::path to   = fs::path(folder) / p.second;
-        std::error_code e1;
-        if (!fs::exists(from, e1)) { fail++; continue; }
-        std::error_code e2;
-        fs::rename(from, to, e2);
-        if (e2) fail++; else ok++;
-    }
-    fs::remove(latest, ec);
-
-    wchar_t buf[256] = {0};
-    swprintf(buf, 256, L"撤销完成：成功 %d 个，失败 %d 个", ok, fail);
-    SetStatus(buf);
-    MessageBoxW(g_hMain, buf, L"撤销", MB_ICONINFORMATION);
+    InvalidateScanCache();
+    SetStatus(L"撤销完成：成功 " + std::to_wstring(r.changed) + L" 个");
+    MessageBoxW(g_hMain, (L"撤销完成：成功 " + std::to_wstring(r.changed) + L" 个").c_str(),
+                L"撤销", MB_ICONINFORMATION);
     PostMessageW(g_hMain, WM_COMMAND, IDC_BTN_PREVIEW, 0);
     return true;
 }
-
 // ------------------------------------------------------------------ 统计总时长
-// 时长走系统自带的 Media Foundation，不需要第三方库；系统不认识的格式会读不到
-static bool VideoDurationSec(const fs::path& p, double& sec) {
-    IMFSourceReader* reader = nullptr;
-    if (FAILED(MFCreateSourceReaderFromURL(p.c_str(), nullptr, &reader)) || !reader)
-        return false;
-    bool ok = false;
-    PROPVARIANT v;
-    PropVariantInit(&v);
-    if (SUCCEEDED(reader->GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE,
-                                                   MF_PD_DURATION, &v)) && v.vt == VT_UI8) {
-        sec = (double)v.uhVal.QuadPart / 10000000.0;   // 100ns -> 秒
-        ok = sec > 0;
-    }
-    PropVariantClear(&v);
-    reader->Release();
-    return ok;
-}
-
 static std::wstring FmtDuration(long sec) {
     long h = sec / 3600, m = (sec % 3600) / 60, s = sec % 60;
     wchar_t b[64] = {0};
@@ -1040,42 +548,21 @@ static void DoCountDuration() {
     }
 
     bool sub = SendMessageW(g_hSub, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    std::vector<fs::path> files;
-    CollectFiles(fs::path(folder), sub, files);
-    if (files.empty()) {
-        MessageBoxW(g_hMain, L"该文件夹里没有找到视频文件。", L"统计总时长", MB_ICONWARNING);
+    const fs::path root(folder);
+    if (!StartMediaTask(MediaTaskKind::Duration,
+        [root, sub](MediaTaskResult& result, const std::atomic<bool>& cancel) {
+            DurationScan scan;
+            bool ok = CountVideoDurations(root, sub, scan, cancel,
+                [](size_t i, size_t n) { if ((i % 8) == 0 || i == n) PostMediaProgress(i, n); },
+                result.error);
+            if (!ok) return;
+            result.fileCount = scan.fileCount;
+            result.readableCount = scan.readableCount;
+            result.totalSeconds = scan.total;
+            result.unreadableFiles = std::move(scan.unreadableFiles);
+        })) {
         return;
     }
-
-    HCURSOR oldCur = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
-    long total = 0;
-    int ok = 0;
-    std::vector<std::wstring> bad;
-    for (size_t i = 0; i < files.size(); ++i) {
-        double sec = 0;
-        if (VideoDurationSec(files[i], sec)) { total += (long)(sec + 0.5); ok++; }
-        else bad.push_back(files[i].filename().wstring());
-        if ((i % 8) == 0) {
-            wchar_t b[256] = {0};
-            swprintf(b, 256, L"统计时长中… %zu / %zu", i + 1, files.size());
-            SetStatus(b);
-        }
-    }
-    SetCursor(oldCur);
-
-    std::wstring msg = L"视频数量：" + std::to_wstring(files.size()) + L" 个\n"
-                     + L"总时长：  " + FmtDuration(total) + L"\n";
-    if (!bad.empty()) {
-        msg += L"\n有 " + std::to_wstring(bad.size()) + L" 个文件读不到时长"
-               L"（系统没有对应的解码器）：\n";
-        for (size_t i = 0; i < bad.size() && i < 8; ++i) msg += L"  " + bad[i] + L"\n";
-        if (bad.size() > 8) msg += L"  ……\n";
-    }
-    if (ok == 0) msg += L"\n一个时长都没读到，这个格式多半不被系统支持。";
-
-    SetStatus(L"共 " + std::to_wstring(files.size()) + L" 个视频，总时长 " + FmtDuration(total)
-              + (bad.empty() ? L"" : L"（" + std::to_wstring(bad.size()) + L" 个读不到时长）"));
-    MessageBoxW(g_hMain, msg.c_str(), L"统计总时长", MB_ICONINFORMATION);
 }
 
 // ------------------------------------------------------------------ 剧集统计
@@ -1132,17 +619,12 @@ static std::wstring BuildSpecialText(int count, const std::vector<double>& secs,
 }
 
 // 报送文案：固定格式 + 填进去的变量
-static std::wstring ComposeReport(const std::wstring& t1, const std::wstring& dy,
+static std::wstring ComposeReport(const std::wstring& t1,
                                   const std::wstring& ep1, const std::wstring& dur1,
                                   const std::wstring& t2, const std::wstring& ep2,
                                   const std::wstring& dur2, const std::wstring& special) {
     std::wstring s;
-    if (!t1.empty() || !dy.empty()) {
-        s += L"原剧:\r\n";
-        std::wstring line = t1;
-        if (!dy.empty()) line += L"（dy：" + dy + L"）";
-        s += line + L"\r\n";
-    }
+    if (!t1.empty()) s += L"原剧:\r\n" + t1 + L"\r\n";
     if (!ep1.empty())  s += L"集数: " + ep1 + L"\r\n";
     if (!dur1.empty()) s += L"时长: " + dur1 + L"\r\n";
     if (!s.empty())    s += L"\r\n";
@@ -1156,65 +638,9 @@ static std::wstring ComposeReport(const std::wstring& t1, const std::wstring& dy
     return s;
 }
 
-// 一个文件夹的统计结果
-struct DramaScan {
-    int  count = 0;
-    long total = 0;          // 各单位四舍五入后相加
-    int  bad   = 0;          // 读不到时长的文件数
-    std::vector<double> secs;
-    std::vector<int>    eps;
-};
-
-static bool ScanDrama(const std::wstring& folder, bool sub, DramaScan& r, std::wstring& err) {
-    r = DramaScan();
-    std::error_code ec;
-    if (folder.empty() || !fs::is_directory(folder, ec)) { err = L"文件夹不存在"; return false; }
-
-    std::vector<fs::path> files;
-    CollectFiles(fs::path(folder), sub, files);
-    if (files.empty()) { err = L"没有视频文件"; return false; }
-
-    struct Ent { fs::path p; long ep; };
-    std::vector<Ent> v;
-    int parsed = 0;
-    for (auto& p : files) {
-        EpResult e = ParseEpisode(p.filename().wstring());
-        if (e.ep > 0) parsed++;
-        v.push_back({ p, e.ep });
-    }
-    bool byEp = (parsed * 10 >= (int)v.size() * 6);
-    if (byEp) {
-        std::stable_sort(v.begin(), v.end(), [](const Ent& a, const Ent& b) {
-            if (a.ep != b.ep) return a.ep < b.ep;
-            return NaturalCompare(a.p.filename().wstring(), b.p.filename().wstring()) < 0;
-        });
-    } else {
-        std::stable_sort(v.begin(), v.end(), [](const Ent& a, const Ent& b) {
-            return NaturalCompare(a.p.filename().wstring(), b.p.filename().wstring()) < 0;
-        });
-    }
-
-    r.count = (int)v.size();
-    for (size_t i = 0; i < v.size(); ++i) {
-        double sec = 0;
-        bool ok = VideoDurationSec(v[i].p, sec);
-        r.secs.push_back(ok ? sec : 0.0);
-        r.eps.push_back(byEp && v[i].ep > 0 ? (int)v[i].ep : (int)i + 1);
-        if (ok) r.total += (long)(sec + 0.5);
-        else    r.bad++;
-        if ((i % 8) == 0) {
-            wchar_t b[256] = {0};
-            swprintf(b, 256, L"统计剧集信息中… %zu / %zu", i + 1, v.size());
-            SetStatus(b);
-        }
-    }
-    return true;
-}
-
 static void UpdateReport() {
     std::wstring text = ComposeReport(
-        Trim(GetText(g_stT1)), Trim(GetText(g_stDy)),
-        Trim(GetText(g_stEp1)), Trim(GetText(g_stDur1)),
+        Trim(GetText(g_stT1)), Trim(GetText(g_stEp1)), Trim(GetText(g_stDur1)),
         Trim(GetText(g_stT2)), Trim(GetText(g_stEp2)),
         Trim(GetText(g_stDur2)), Trim(GetText(g_stSpecial)));
     SetWindowTextW(g_stReport, text.c_str());
@@ -1229,58 +655,117 @@ static void DoScanStats() {
     bool sub = SendMessageW(g_hSub, BM_GETCHECK, 0, 0) == BST_CHECKED;
     bool same = !f1.empty() && _wcsicmp(f1.c_str(), f2.c_str()) == 0;
 
-    HCURSOR oldCur = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
-    DramaScan s1, s2;
-    std::wstring e1, e2;
-    bool ok1 = false, ok2 = false;
-    if (!f1.empty()) ok1 = ScanDrama(f1, sub, s1, e1);
-    if (!f2.empty()) {
-        ok2 = same ? ok1 : ScanDrama(f2, sub, s2, e2);
-        if (same) s2 = s1;
-    }
-    SetCursor(oldCur);
+    const fs::path root1(f1), root2(f2);
+    StartMediaTask(MediaTaskKind::DramaStats,
+        [root1, root2, sub, f1, f2, same](MediaTaskResult& result, const std::atomic<bool>& cancel) {
+            result.sameFolders = same;
+            if (!f1.empty()) {
+                result.ok1 = ScanDrama(root1, sub, result.scan1, cancel,
+                    [](size_t i, size_t n) {
+                        if ((i % 8) == 0 || i == n) PostMediaProgress(i, n, L"原剧");
+                    },
+                    result.error);
+            }
+            if (cancel.load()) return;
+            if (!f2.empty()) {
+                if (same) {
+                    result.ok2 = result.ok1;
+                    result.scan2 = result.scan1;
+                    result.error2 = result.error;
+                } else {
+                    result.ok2 = ScanDrama(root2, sub, result.scan2, cancel,
+                        [](size_t i, size_t n) {
+                            if ((i % 8) == 0 || i == n) PostMediaProgress(i, n, L"海外");
+                        },
+                        result.error2);
+                }
+            }
+        });
+}
 
-    if (!ok1 && !ok2) {
+static void ApplyDramaScan(const MediaTaskResult& result) {
+    if (!result.ok1 && !result.ok2) {
         std::wstring msg = L"没有统计到视频。\n";
-        if (!f1.empty()) msg += L"\n原剧：" + e1;
-        if (!f2.empty()) msg += L"\n海外：" + e2;
+        if (!Trim(GetText(g_stF1)).empty()) msg += L"\n原剧：" + result.error;
+        if (!Trim(GetText(g_stF2)).empty()) msg += L"\n海外：" + result.error2;
         MessageBoxW(g_hMain, msg.c_str(), L"剧集统计", MB_ICONWARNING);
         return;
     }
 
     g_suppress = true;
-    if (ok1) {
-        SetWindowTextW(g_stEp1, std::to_wstring(s1.count).c_str());
-        SetWindowTextW(g_stDur1, FmtClock(s1.total).c_str());
+    if (result.ok1) {
+        SetWindowTextW(g_stEp1, std::to_wstring(result.scan1.count).c_str());
+        SetWindowTextW(g_stDur1, FmtClock(result.scan1.total).c_str());
     }
-    if (ok2) {
-        SetWindowTextW(g_stEp2, std::to_wstring(s2.count).c_str());
-        SetWindowTextW(g_stDur2, FmtClock(s2.total).c_str());
+    if (result.ok2) {
+        SetWindowTextW(g_stEp2, std::to_wstring(result.scan2.count).c_str());
+        SetWindowTextW(g_stDur2, FmtClock(result.scan2.total).c_str());
     }
-    const DramaScan& sp = ok2 ? s2 : s1;
-    if (sp.count > 0) SetWindowTextW(g_stSpecial, BuildSpecialText(sp.count, sp.secs, sp.eps).c_str());
+    const DramaScan& special = result.ok2 ? result.scan2 : result.scan1;
+    if (special.count > 0)
+        SetWindowTextW(g_stSpecial, BuildSpecialText(special.count, special.secs, special.eps).c_str());
     g_suppress = false;
-
     UpdateReport();
 
-    std::wstring st;
-    auto part = [&](const wchar_t* name, const DramaScan& s, bool ok) {
+    std::wstring status;
+    auto append = [&](const wchar_t* name, const DramaScan& scan, bool ok) {
         if (!ok) return;
-        if (!st.empty()) st += L"  ｜  ";
-        st += std::wstring(name) + L" " + std::to_wstring(s.count) + L" 集 · " + FmtClock(s.total);
-        if (s.bad > 0) st += L"（" + std::to_wstring(s.bad) + L" 个读不到时长）";
+        if (!status.empty()) status += L"  ｜  ";
+        status += std::wstring(name) + L" " + std::to_wstring(scan.count) + L" 集 · " + FmtClock(scan.total);
+        if (scan.bad > 0) status += L"（" + std::to_wstring(scan.bad) + L" 个读不到时长）";
     };
-    part(L"原剧", s1, ok1);
-    part(L"海外", s2, ok2);
-    if (st.empty()) st = L"统计完成";
-    SetStatus(st);
+    append(L"原剧", result.scan1, result.ok1);
+    append(L"海外", result.scan2, result.ok2);
+    SetStatus(status.empty() ? L"统计完成" : status);
 }
 
-// 自动识别剧名后回填（文件夹名 -> 剧名）
-static void GuessInto(HWND edit, const std::wstring& folder) {
-    if (!Trim(GetText(edit)).empty()) return;
-    std::wstring t = GuessTitleFromFolder(folder);
-    if (!t.empty()) SetWindowTextW(edit, t.c_str());
+static void CompleteMediaTask(MediaTaskResult* raw) {
+    std::unique_ptr<MediaTaskResult> result(raw);
+    if (g_mediaThread.joinable()) g_mediaThread.join();
+    g_mediaTaskActive = false;
+    SetMediaControlsBusy(false, result->kind);
+    if (g_closeAfterMediaTask) {
+        DestroyWindow(g_hMain);
+        return;
+    }
+    if (result->cancelled) { SetStatus(L"统计已取消"); return; }
+    if (!result->error.empty() && result->kind == MediaTaskKind::Duration) {
+        MessageBoxW(g_hMain, result->error.c_str(), L"统计总时长", MB_ICONWARNING);
+        SetStatus(result->error);
+        return;
+    }
+    if (result->kind == MediaTaskKind::Duration) {
+        std::wstring msg = L"视频数量：" + std::to_wstring(result->fileCount) + L" 个\n" +
+                           L"总时长：  " + FmtDuration(result->totalSeconds) + L"\n";
+        if (!result->unreadableFiles.empty()) {
+            msg += L"\n有 " + std::to_wstring(result->unreadableFiles.size()) + L" 个文件读不到时长（系统没有对应的解码器）：\n";
+            for (size_t i = 0; i < result->unreadableFiles.size() && i < 8; ++i)
+                msg += L"  " + result->unreadableFiles[i] + L"\n";
+            if (result->unreadableFiles.size() > 8) msg += L"  ……\n";
+        }
+        if (result->readableCount == 0) msg += L"\n一个时长都没读到，这个格式多半不被系统支持。";
+        SetStatus(L"共 " + std::to_wstring(result->fileCount) + L" 个视频，总时长 " +
+                  FmtDuration(result->totalSeconds) +
+                  (result->unreadableFiles.empty() ? L"" : L"（" +
+                   std::to_wstring(result->unreadableFiles.size()) + L" 个读不到时长）"));
+        MessageBoxW(g_hMain, msg.c_str(), L"统计总时长", MB_ICONINFORMATION);
+    } else {
+        ApplyDramaScan(*result);
+    }
+}
+
+static bool ApplyStatsNameGuess(bool first, const std::wstring& folder, bool overwrite) {
+    DramaNameGuess guess = GuessDramaNamesFromFolder(folder);
+    if (guess.title.empty()) return false;
+
+    HWND title = first ? g_stT1 : g_stT2;
+    bool titleAuto = first ? g_stT1Auto : g_stT2Auto;
+    if (overwrite || Trim(GetText(title)).empty() || titleAuto) {
+        SetWindowTextW(title, guess.title.c_str());
+        if (first) g_stT1Auto = true;
+        else g_stT2Auto = true;
+    }
+    return true;
 }
 
 
@@ -1342,6 +827,17 @@ static void CopyToClipboard(const std::wstring& s) {
 }
 
 // ------------------------------------------------------------------ 设置
+static fs::path SettingsPath() {
+    PWSTR localAppData = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_CREATE, nullptr, &localAppData)) &&
+        localAppData) {
+        fs::path path = fs::path(localAppData) / L"short-drama-renamer" / L"settings.ini";
+        CoTaskMemFree(localAppData);
+        return path;
+    }
+    return fs::path(ExeDir()) / L"settings.ini";
+}
+
 static void SaveSettings() {
     std::string body;
     auto put = [&](const char* k, const std::wstring& v) {
@@ -1361,16 +857,23 @@ static void SaveSettings() {
     put("auto", SendMessageW(g_hAuto, BM_GETCHECK, 0, 0) == BST_CHECKED ? L"1" : L"0");
     put("keepep", SendMessageW(g_hKeepEp, BM_GETCHECK, 0, 0) == BST_CHECKED ? L"1" : L"0");
 
-    std::ofstream ofs(fs::path(ExeDir() + L"\\settings.ini"), std::ios::binary | std::ios::trunc);
-    if (!ofs) return;
-    ofs.write(body.data(), (std::streamsize)body.size());
+    std::wstring error;
+    WriteUtf8Atomic(SettingsPath(), body, error);
 }
 
 static void LoadSettings() {
-    std::ifstream ifs(fs::path(ExeDir() + L"\\settings.ini"), std::ios::binary);
+    fs::path path = SettingsPath();
+    std::ifstream ifs(path, std::ios::binary);
+    bool migrateLegacy = false;
+    if (!ifs) {
+        // One-time migration from the old portable, exe-adjacent location.
+        path = fs::path(ExeDir()) / L"settings.ini";
+        ifs.clear();
+        ifs.open(path, std::ios::binary);
+        migrateLegacy = (bool)ifs;
+    }
     if (!ifs) return;
     std::string raw((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-    ifs.close();
     if (raw.size() >= 3 && (unsigned char)raw[0] == 0xEF) raw = raw.substr(3);
 
     std::wstring w = U82W(raw);
@@ -1393,6 +896,7 @@ static void LoadSettings() {
         else if (k == L"auto")   SendMessageW(g_hAuto, BM_SETCHECK, v == L"1" ? BST_CHECKED : BST_UNCHECKED, 0);
         else if (k == L"keepep") SendMessageW(g_hKeepEp, BM_SETCHECK, v == L"1" ? BST_CHECKED : BST_UNCHECKED, 0);
     }
+    if (migrateLegacy) SaveSettings();
 }
 
 // ------------------------------------------------------------------ 布局
@@ -1403,20 +907,21 @@ static void LayoutStats(int W, int H) {
     int eh = S(28), rh = S(38);
     int right = W - m;
 
-    MoveWindow(g_stF1, bx, y, right - bx - S(96), eh, TRUE);
-    MoveWindow(g_stB1, right - S(88), y, S(88), eh, TRUE);
+    const int actionW = S(88), actionGap = S(8);
+    MoveWindow(g_stF1, bx, y, right - bx - actionW * 2 - actionGap, eh, TRUE);
+    MoveWindow(g_stG1, right - actionW * 2 - actionGap, y, actionW, eh, TRUE);
+    MoveWindow(g_stB1, right - actionW, y, actionW, eh, TRUE);
     y += rh;
-    MoveWindow(g_stF2, bx, y, right - bx - S(96), eh, TRUE);
-    MoveWindow(g_stB2, right - S(88), y, S(88), eh, TRUE);
+    MoveWindow(g_stF2, bx, y, right - bx - actionW * 2 - actionGap, eh, TRUE);
+    MoveWindow(g_stG2, right - actionW * 2 - actionGap, y, actionW, eh, TRUE);
+    MoveWindow(g_stB2, right - actionW, y, actionW, eh, TRUE);
     y += rh;
 
-    // 剧名 / dy 别名 / 集数 / 时长 四列对齐
-    int titleW = S(240), dyW = S(150), epW = S(56), durW = S(88);
-    int xDy  = bx + titleW + S(16) + S(LBL_W);
-    int xEp  = xDy + dyW + S(16) + S(LBL_W);
+    // 剧名 / 集数 / 时长三列对齐，剧名栏留宽一些显示括号内容。
+    int titleW = S(430), epW = S(56), durW = S(88);
+    int xEp  = bx + titleW + S(16) + S(LBL_W);
     int xDur = xEp + epW + S(16) + S(LBL_W);
     MoveWindow(g_stT1, bx, y, titleW, eh, TRUE);
-    MoveWindow(g_stDy, xDy, y, dyW, eh, TRUE);
     MoveWindow(g_stEp1, xEp, y, epW, eh, TRUE);
     MoveWindow(g_stDur1, xDur, y, durW, eh, TRUE);
     y += rh;
@@ -1610,7 +1115,6 @@ static void DrawStatsLabels(HDC hdc, HWND hwnd) {
     lblAt(g_stF1, L"原剧文件夹");
     lblAt(g_stF2, L"海外文件夹");
     lblAt(g_stT1, L"原剧名");
-    lblAt(g_stDy, L"dy 别名");
     lblAt(g_stEp1, L"集数");
     lblAt(g_stDur1, L"时长");
     lblAt(g_stT2, L"海外剧名");
@@ -1636,7 +1140,7 @@ static void ShowPage(HWND hwnd, int page) {
                          g_hSort, g_hTag, g_hCustom, g_hColon, g_hList, g_hPreview,
                          g_hRename, g_hUndo, g_hTitles, g_hOpen, g_hGuess, g_hAuto,
                          g_hKeepEp, g_hHelp, g_hDuration };
-    HWND statsCtl[] = { g_stF1, g_stB1, g_stF2, g_stB2, g_stT1, g_stDy, g_stEp1,
+    HWND statsCtl[] = { g_stF1, g_stB1, g_stG1, g_stF2, g_stB2, g_stG2, g_stT1, g_stEp1,
                         g_stDur1, g_stT2, g_stEp2, g_stDur2, g_stSpecial, g_stScan,
                         g_stCopy, g_stReport };
     for (HWND h : renameCtl) ShowWindow(h, page == 0 ? SW_SHOW : SW_HIDE);
@@ -1711,7 +1215,8 @@ L"    顶部有两个页签：批量改名、剧集统计。点「剧集统计�
 L"    原剧文件夹：原版短剧放的目录。\r\n"
 L"    海外文件夹：海外转译版放的目录。\r\n"
 L"    填好点「统计信息」，两边各扫一遍，自动算出集数和总时长。\r\n"
-L"    剧名会按目录名自动认出来，认错了直接改；集数、时长也能手改。\r\n"
+L"    选文件夹时会按目录名尝试识别剧名；也能点旁边的「智能识别」重新识别。\r\n"
+L"    括号中的内容会保留在剧名里；认错了可直接修改剧名，集数、时长也能手改。\r\n"
 L"    特殊情况按海外剧的每集时长自动判断：哪几集满 1 分钟、其余几集不满 1 分钟、区间多少秒。\r\n"
 L"    下方大框就是报送文案，格式固定（原剧 / 集数 / 时长 / 海外转译后 / 特殊情况），\r\n"
 L"    改上面任何一格都会立刻同步。点「复制文案」直接粘给对接的人。\r\n"
@@ -1820,6 +1325,21 @@ static void ShowTutorial(HWND owner) {
 // ------------------------------------------------------------------ 窗口过程
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+    case WM_MEDIA_PROGRESS: {
+        std::unique_ptr<MediaProgressMessage> progress((MediaProgressMessage*)lp);
+        if (progress && g_mediaTaskActive) {
+            std::wstring status = g_mediaTaskKind == MediaTaskKind::Duration
+                ? L"统计时长中… " : L"统计剧集信息中… ";
+            if (!progress->label.empty()) status += progress->label + L" ";
+            status += std::to_wstring(progress->current) + L" / " + std::to_wstring(progress->total);
+            SetStatus(status);
+        }
+        return 0;
+    }
+    case WM_MEDIA_COMPLETE:
+        CompleteMediaTask((MediaTaskResult*)lp);
+        return 0;
+
     case WM_CREATE: {
         g_hMain = hwnd;
         DWORD editStyle = WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL;
@@ -1929,10 +1449,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         };
         g_stF1  = mkEdit(IDC_ST_FOLDER1, L"", se);
         g_stB1  = mkBtn(IDC_ST_BROWSE1, L"浏览...", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON);
+        g_stG1  = mkBtn(IDC_ST_GUESS1, L"智能识别", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON);
         g_stF2  = mkEdit(IDC_ST_FOLDER2, L"", se);
         g_stB2  = mkBtn(IDC_ST_BROWSE2, L"浏览...", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON);
+        g_stG2  = mkBtn(IDC_ST_GUESS2, L"智能识别", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON);
         g_stT1  = mkEdit(IDC_ST_TITLE1, L"", se);
-        g_stDy  = mkEdit(IDC_ST_DY, L"", se);
         g_stEp1 = mkEdit(IDC_ST_EP1, L"", se);
         g_stDur1 = mkEdit(IDC_ST_DUR1, L"", se);
         g_stT2  = mkEdit(IDC_ST_TITLE2, L"", se);
@@ -1948,7 +1469,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                        g_hSort, g_hTag, g_hCustom, g_hColon, g_hList, g_hPreview,
                        g_hRename, g_hUndo, g_hTitles, g_hOpen, g_hGuess, g_hAuto,
                        g_hKeepEp, g_hHelp, g_hDuration,
-                       g_stF1, g_stB1, g_stF2, g_stB2, g_stT1, g_stDy, g_stEp1,
+                       g_stF1, g_stB1, g_stG1, g_stF2, g_stB2, g_stG2, g_stT1, g_stEp1,
                        g_stDur1, g_stT2, g_stEp2, g_stDur2, g_stSpecial, g_stScan,
                        g_stCopy, g_stReport };
         for (HWND h : all) SendMessageW(h, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
@@ -2069,7 +1590,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SetWindowTextW(g_hFolder, folder.c_str());
             g_suppress = false;
             if (Trim(GetText(g_hTitle)).empty() || g_titleAuto) {
-                std::wstring t = GuessTitleFromFolder(folder);
+                std::wstring t = GuessDramaNamesFromFolder(folder).title;
                 if (!t.empty()) {
                     g_suppress = true;
                     SetWindowTextW(g_hTitle, t.c_str());
@@ -2094,7 +1615,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g_suppress = false;
                 // 剧名还空着（或本来就是自动填的），就顺手从路径里认一下
                 if (Trim(GetText(g_hTitle)).empty() || g_titleAuto) {
-                    std::wstring t = GuessTitleFromFolder(f);
+                    std::wstring t = GuessDramaNamesFromFolder(f).title;
                     if (!t.empty()) {
                         g_suppress = true;
                         SetWindowTextW(g_hTitle, t.c_str());
@@ -2188,7 +1709,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 MessageBoxW(hwnd, L"请先选择视频文件夹。", L"提示", MB_ICONWARNING);
                 return 0;
             }
-            std::wstring t = GuessTitleFromFolder(folder);
+            std::wstring t = GuessDramaNamesFromFolder(folder).title;
             if (t.empty()) {
                 MessageBoxW(hwnd,
                     L"没能从这个路径里看出剧名。\n\n"
@@ -2222,9 +1743,34 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (PickFolder(f)) {
                 bool first = (id == IDC_ST_BROWSE1);
                 SetWindowTextW(first ? g_stF1 : g_stF2, f.c_str());
-                GuessInto(first ? g_stT1 : g_stT2, f);
+                g_suppress = true;
+                ApplyStatsNameGuess(first, f, false);
+                g_suppress = false;
                 UpdateReport();
             }
+            return 0;
+        }
+        case IDC_ST_GUESS1:
+        case IDC_ST_GUESS2: {
+            bool first = (id == IDC_ST_GUESS1);
+            std::wstring folder = Trim(GetText(first ? g_stF1 : g_stF2));
+            if (folder.empty()) {
+                MessageBoxW(hwnd, L"请先选择对应的文件夹。", L"智能识别剧名", MB_ICONWARNING);
+                return 0;
+            }
+            g_suppress = true;
+            bool ok = ApplyStatsNameGuess(first, folder, true);
+            g_suppress = false;
+            if (!ok) {
+                MessageBoxW(hwnd,
+                    L"没能从这个路径里识别出剧名。\n\n"
+                    L"可以把视频放进以剧名命名的文件夹，或直接手动填写。",
+                    L"智能识别剧名", MB_ICONINFORMATION);
+                return 0;
+            }
+            UpdateReport();
+            SetStatus(L"已智能识别" + std::wstring(first ? L"原剧名" : L"海外剧名") +
+                      L"：" + GetText(first ? g_stT1 : g_stT2));
             return 0;
         }
         case IDC_ST_BTN_SCAN:
@@ -2242,14 +1788,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case IDC_ST_TITLE1:
-        case IDC_ST_DY:
         case IDC_ST_EP1:
         case IDC_ST_DUR1:
         case IDC_ST_TITLE2:
         case IDC_ST_EP2:
         case IDC_ST_DUR2:
         case IDC_ST_SPECIAL:
-            if (code == EN_CHANGE && !g_suppress) UpdateReport();
+            if (code == EN_CHANGE && !g_suppress) {
+                if (id == IDC_ST_TITLE1) g_stT1Auto = false;
+                else if (id == IDC_ST_TITLE2) g_stT2Auto = false;
+                UpdateReport();
+            }
             return 0;
         case IDC_BTN_HELP:
             ShowTutorial(hwnd);
@@ -2265,8 +1814,32 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         break;
 
+    case WM_CLOSE:
+        if (g_mediaTaskActive) {
+            g_closeAfterMediaTask = true;
+            g_mediaCancel.store(true);
+            SetStatus(L"正在取消后台统计，完成后关闭窗口…");
+            return 0;
+        }
+        DestroyWindow(hwnd);
+        return 0;
+
     case WM_DESTROY:
         KillTimer(hwnd, IDT_REFRESH);
+        if (g_mediaTaskActive) {
+            g_mediaCancel.store(true);
+            if (g_mediaThread.joinable()) g_mediaThread.join();
+            g_mediaTaskActive = false;
+        }
+        {
+            MSG pending{};
+            while (PeekMessageW(&pending, hwnd, WM_MEDIA_PROGRESS, WM_MEDIA_COMPLETE, PM_REMOVE)) {
+                if (pending.message == WM_MEDIA_PROGRESS)
+                    delete (MediaProgressMessage*)pending.lParam;
+                else
+                    delete (MediaTaskResult*)pending.lParam;
+            }
+        }
         SaveSettings();
         PostQuitMessage(0);
         return 0;
@@ -2299,6 +1872,33 @@ static void CHECK(bool cond, const std::wstring& what) {
 static void TouchFile(const fs::path& p) {
     std::ofstream ofs(p, std::ios::binary | std::ios::trunc);
     ofs << "x";
+}
+
+static bool CreateTestDirectory(const fs::path& path) {
+    if (CreateDirectoryW(path.wstring().c_str(), nullptr)) return true;
+    if (GetLastError() != ERROR_ALREADY_EXISTS) return false;
+    DWORD attrs = GetFileAttributesW(path.wstring().c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+static void RemoveTestTree(const fs::path& path) {
+    std::wstring pattern = (path / L"*").wstring();
+    WIN32_FIND_DATAW data{};
+    HANDLE find = FindFirstFileW(pattern.c_str(), &data);
+    if (find != INVALID_HANDLE_VALUE) {
+        do {
+            if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0) continue;
+            fs::path child = path / data.cFileName;
+            if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) RemoveTestTree(child);
+            else {
+                SetFileAttributesW(child.wstring().c_str(), FILE_ATTRIBUTE_NORMAL);
+                DeleteFileW(child.wstring().c_str());
+            }
+        } while (FindNextFileW(find, &data));
+        FindClose(find);
+    }
+    SetFileAttributesW(path.wstring().c_str(), FILE_ATTRIBUTE_NORMAL);
+    RemoveDirectoryW(path.wstring().c_str());
 }
 
 static int RunSelfTest() {
@@ -2358,12 +1958,14 @@ static int RunSelfTest() {
 
     // ---- 4. 端到端：建目录 -> 计划 -> 改名 -> 撤销
     LOGW(L"\n[4] 端到端改名与撤销\n");
-    wchar_t tmp[MAX_PATH] = {0};
-    GetTempPathW(MAX_PATH, tmp);
-    fs::path work = fs::path(tmp) / (L"rn-selftest-" + std::to_wstring(GetCurrentProcessId()));
+    const fs::path tempRoot = ExeDir();
+    const std::wstring testId = std::to_wstring(GetCurrentProcessId()) + L"-" +
+                                 std::to_wstring(GetTickCount64());
+    fs::path work = tempRoot / (L".rn-selftest-" + testId);
     std::error_code ec;
-    fs::remove_all(work, ec);
-    fs::create_directories(work, ec);
+    BOOL createdWork = CreateDirectoryW(work.wstring().c_str(), nullptr);
+    DWORD createError = createdWork ? ERROR_SUCCESS : GetLastError();
+    CHECK(createdWork != FALSE, L"创建自检工作目录（系统错误 " + std::to_wstring(createError) + L"）");
 
     const wchar_t* srcNames[] = {
         L"剧集 10.mp4", L"剧集 2.mp4", L"剧集 1.mp4", L"剧集 3.mp4"
@@ -2398,9 +2000,8 @@ static int RunSelfTest() {
     }
 
     // 重名标记：EP08 与 第8集 都认出第 8 集
-    fs::path dupDir = fs::path(tmp) / (L"rn-selftest-dup-" + std::to_wstring(GetCurrentProcessId()));
-    fs::remove_all(dupDir, ec);
-    fs::create_directories(dupDir, ec);
+    fs::path dupDir = tempRoot / (L".rn-selftest-dup-" + testId);
+    CreateTestDirectory(dupDir);
     TouchFile(dupDir / L"EP08.mp4");
     TouchFile(dupDir / L"第8集.mp4");
     TouchFile(dupDir / L"1.mp4");
@@ -2413,50 +2014,75 @@ static int RunSelfTest() {
         CHECK(dupN == 2, L"沿用原集数时 EP08 与 第8集 被标为重名（2 项）");
     }
 
-    // 直接改名，验证目标名已预先确定且不覆盖现有文件
+    // 通过生产事务执行改名和撤销，覆盖目标名已预先确定、无覆盖和日志清理。
     if (made) {
-        bool ok = true;
-        std::vector<std::pair<fs::path, fs::path>> done;
-        for (size_t i = 0; i < plan.size(); ++i) {
-            fs::path from = work / plan[i].oldName;
-            fs::path to = work / plan[i].newName;
-            if (!MoveFileExW(from.c_str(), to.c_str(), 0)) { ok = false; break; }
-            done.push_back({ from, to });
-        }
-        if (!ok) {
-            for (auto it = done.rbegin(); it != done.rend(); ++it)
-                MoveFileExW(it->second.c_str(), it->first.c_str(), 0);
-        }
-        CHECK(ok, L"直接改名执行成功");
+        OperationResult renamed = ExecuteRename(work, plan);
+        CHECK(renamed.ok && renamed.changed == 4, L"事务改名执行成功");
 
         int found = 0;
         for (auto& e : fs::directory_iterator(work, ec))
             if (e.path().extension() == L".mp4") found++;
         CHECK(found == 4, L"改名后仍有 4 个 mp4");
 
-        // 撤销记录
-        std::vector<std::pair<std::wstring, std::wstring>> pairs;
-        for (auto& it : plan) pairs.push_back({ it.newName, it.oldName });
-        std::wstring up, uerr;
-        bool saved = SaveUndo(work, pairs, up, uerr);
-        CHECK(saved, L"撤销记录已写入");
-        CHECK(saved && fs::exists(up), L"撤销文件存在");
-
-        // 还原
-        int restored = 0;
-        for (auto& p : pairs) {
-            fs::path a = work / p.first, b = work / p.second;
-            if (!fs::exists(a, ec)) continue;
-            fs::rename(a, b, ec);
-            if (!ec) restored++;
-        }
-        CHECK(restored == 4, L"撤销还原 4 个文件");
+        OperationResult undone = UndoLatest(work);
+        CHECK(undone.ok && undone.changed == 4, L"事务撤销还原 4 个文件");
         CHECK(fs::exists(work / L"剧集 10.mp4", ec), L"原名 剧集 10.mp4 已恢复");
     }
 
+    // 文件名互换必须能完整提交并撤销。
+    fs::path swapDir = tempRoot / (L".rn-selftest-swap-" + testId);
+    CreateTestDirectory(swapDir);
+    TouchFile(swapDir / L"a.mp4");
+    TouchFile(swapDir / L"b.mp4");
+    PlanItem a, b;
+    a.src = swapDir / L"a.mp4"; a.target = swapDir / L"b.mp4";
+    b.src = swapDir / L"b.mp4"; b.target = swapDir / L"a.mp4";
+    OperationResult swap = ExecuteRename(swapDir, { a, b });
+    CHECK(swap.ok && swap.changed == 2, L"互换文件名可通过临时路径提交");
+    OperationResult swapUndo = UndoLatest(swapDir);
+    CHECK(swapUndo.ok && fs::exists(swapDir / L"a.mp4", ec) && fs::exists(swapDir / L"b.mp4", ec),
+          L"互换操作可撤销");
+
+    // 目标由无需改名的源文件占用时必须在操作前拦截。
+    fs::path conflictDir = tempRoot / (L".rn-selftest-conflict-" + testId);
+    CreateTestDirectory(conflictDir);
+    TouchFile(conflictDir / L"source.mp4");
+    TouchFile(conflictDir / L"kept.mp4");
+    PlanItem moving, kept;
+    moving.src = conflictDir / L"source.mp4"; moving.target = conflictDir / L"kept.mp4";
+    kept.src = conflictDir / L"kept.mp4"; kept.target = conflictDir / L"kept.mp4";
+    OperationResult blocked = ExecuteRename(conflictDir, { moving, kept });
+    CHECK(!blocked.ok && fs::exists(moving.src, ec) && fs::exists(kept.src, ec),
+          L"未改名源文件占用目标时拒绝执行且保留两文件");
+
+    // 递归预览和撤销必须保留相对目录位置。
+    fs::path recursiveDir = tempRoot / (L".rn-selftest-recursive-" + testId);
+    CreateTestDirectory(recursiveDir);
+    CreateTestDirectory(recursiveDir / L"nested");
+    TouchFile(recursiveDir / L"root 1.mp4");
+    TouchFile(recursiveDir / L"nested" / L"root 2.mp4");
+    std::vector<PlanItem> recursivePlan;
+    bool recursiveMade = MakePlan(recursiveDir.wstring(), L"Recursive", 1, 2,
+                                  L"Alpha", 0, 0, true, false, recursivePlan, err);
+    OperationResult recursiveRename = recursiveMade ? ExecuteRename(recursiveDir, recursivePlan) : OperationResult();
+    bool nestedRenamed = false;
+    if (recursiveRename.ok) {
+        for (const auto& item : recursivePlan)
+            if (item.relativeSrc.parent_path() == L"nested" && fs::exists(item.target, ec)) nestedRenamed = true;
+    }
+    CHECK(recursiveMade && recursivePlan.size() == 2 && recursiveRename.ok && nestedRenamed,
+          L"递归改名保持子目录结构");
+    OperationResult recursiveUndo = recursiveRename.ok ? UndoLatest(recursiveDir) : OperationResult();
+    CHECK(recursiveUndo.ok && fs::exists(recursiveDir / L"nested" / L"root 2.mp4", ec),
+          L"递归改名可撤销并恢复到原目录");
+    RemoveTestTree(dupDir);
+    RemoveTestTree(swapDir);
+    RemoveTestTree(conflictDir);
+    RemoveTestTree(recursiveDir);
+
     // ---- 5. 子目录 + 非视频过滤
     LOGW(L"\n[5] 子目录与扩展名过滤\n");
-    fs::create_directories(work / L"sub", ec);
+    CreateTestDirectory(work / L"sub");
     TouchFile(work / L"sub" / L"剧集 4.mp4");
     TouchFile(work / L"readme.txt");
     std::vector<PlanItem> p2;
@@ -2466,7 +2092,7 @@ static int RunSelfTest() {
     MakePlan(work.wstring(), L"T", 1, 2, L"Alpha", 0, 0, true, false, p3, err);
     CHECK(p3.size() == 5, L"递归时包含子目录，共 5");
 
-    fs::remove_all(work, ec);
+    RemoveTestTree(work);
 
     // ---- 6. 从文件夹名识别剧名
     LOGW(L"\n[6] 从文件夹名识别剧名\n");
@@ -2526,14 +2152,14 @@ static int RunSelfTest() {
     CHECK(BuildSpecialText(0, {}, {}) == L"", L"没有剧集时为空");
 
     std::wstring rep = ComposeReport(
-        L"顾总裁的烟火厨娘", L"顾宅烟火遇真心", L"54", L"45:25",
+        L"顾总裁的烟火厨娘（dy：顾宅烟火遇真心）", L"54", L"45:25",
         L"8 Bowls of Fried Rice for 800 Million", L"54", L"46:23", sp);
     std::wstring want = L"原剧:\r\n顾总裁的烟火厨娘（dy：顾宅烟火遇真心）\r\n集数: 54\r\n时长: 45:25\r\n\r\n"
                         L"海外转译后:\r\n8 Bowls of Fried Rice for 800 Million\r\n集数: 54\r\n时长: 46:23\r\n"
                         L"特殊情况: " + sp;
     CHECK(rep == want, L"报送文案格式");
-    CHECK(ComposeReport(L"", L"", L"", L"", L"", L"", L"", L"") == L"", L"空字段时文案为空");
-    CHECK(ComposeReport(L"剧", L"", L"10", L"", L"", L"", L"", L"") == L"原剧:\r\n剧\r\n集数: 10",
+    CHECK(ComposeReport(L"", L"", L"", L"", L"", L"", L"") == L"", L"空字段时文案为空");
+    CHECK(ComposeReport(L"剧", L"10", L"", L"", L"", L"", L"") == L"原剧:\r\n剧\r\n集数: 10",
           L"只有原剧信息");
 
     LOGW(L"\n=== 结果：%ls（失败 %d 项）===\n",
@@ -2565,7 +2191,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow) {
     if (g_dpi <= 0) g_dpi = 96;
 
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    MFStartup(MF_VERSION);      // 统计时长要用
 
     INITCOMMONCONTROLSEX icc = {0};
     icc.dwSize = sizeof(icc);
@@ -2618,7 +2243,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow) {
         }
     }
 
-    MFShutdown();
     CoUninitialize();
     return (int)msg.wParam;
 }
