@@ -1,0 +1,30 @@
+{
+  "config": {
+    "color_space": -1,
+    "hdr_vivid": false,
+    "mixed_track_mode_on": false,
+    "render_index_track_mode_on": false,
+    "use_float_render": false
+  },
+  "create_time": 1793099339971711,
+  "id": "47FDF405-C2AB-4B3F-9242-09DB519567BF",
+  "main_timeline_id": "FB12D1C8-4354-4120-B8B0-BF1A5AE3A979",
+  "timelines": [
+    {
+      "create_time": 1793099339965169,
+      "id": "FB12D1C8-4354-4120-B8B0-BF1A5AE3A979",
+      "is_marked_delete": false,
+      "name": "1",
+      "update_time": 1793099339965169
+    },
+    {
+      "create_time": 1793099339966837,
+      "id": "83329CA7-DCCF-4F15-B25C-B5F00411CC57",
+      "is_marked_delete": false,
+      "name": "2",
+      "update_time": 1793099339966837
+    }
+  ],
+  "update_time": 1793099339971714,
+  "version": 0
+}

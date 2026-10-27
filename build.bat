@@ -22,7 +22,7 @@ windres.exe -I src -O coff -o src\app.res src\app.rc
 if errorlevel 1 goto err
 
 echo [2/3] Compiling application ...
-g++.exe -std=c++17 -O2 -municode -mwindows -static -static-libgcc -static-libstdc++ -pthread -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers src\main.cpp src\renamer_core.cpp src\renamer_ops.cpp src\renamer_media.cpp src\app.res -o renamer.exe -lcomctl32 -lole32 -loleaut32 -luuid -lshell32 -lshlwapi -lgdi32 -luser32 -lmfplat -lmfreadwrite -lmfuuid
+g++.exe -std=c++17 -O2 -municode -mwindows -static -static-libgcc -static-libstdc++ -pthread -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Isrc\third_party src\main.cpp src\renamer_core.cpp src\renamer_archives.cpp src\renamer_ops.cpp src\renamer_media.cpp src\jianying_draft.cpp src\app.res -o renamer.exe -lcomctl32 -lole32 -loleaut32 -luuid -lshell32 -lshlwapi -lgdi32 -luser32 -lmfplat -lmfreadwrite -lmfuuid
 if errorlevel 1 goto err
 
 echo [3/3] Naming output ...

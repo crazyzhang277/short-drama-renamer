@@ -1,0 +1,232 @@
+{
+  "canvas_config": {
+    "height": 1920,
+    "width": 1080
+  },
+  "color_space": 0,
+  "config": {},
+  "duration": 14080000,
+  "function_assistant_info": {
+    "fps": {}
+  },
+  "id": "FB12D1C8-4354-4120-B8B0-BF1A5AE3A979",
+  "keyframes": {},
+  "last_modified_platform": {
+    "app_id": 3704,
+    "app_source": "lv",
+    "app_version": "11.6.0",
+    "device_id": "1e29327b35f06f4b222d943a152e10d6",
+    "hard_disk_id": "80207ee6fcca293d45c0f65b8d8fadc2",
+    "mac_address": "d8e64c3235f889d1c9580396cb000e1a",
+    "os": "windows",
+    "os_version": "10.0.22631"
+  },
+  "materials": {
+    "canvases": [
+      {
+        "id": "708d832b21674ded915662abd074777e",
+        "type": "canvas_color"
+      },
+      {
+        "id": "94d2580f6fd049de999a79e92da70dde",
+        "type": "canvas_color"
+      },
+      {
+        "id": "8bf1137bb5914ca282378125c05279b0",
+        "type": "canvas_color"
+      },
+      {
+        "id": "7a584bacd4e1433b87f587c56ad68d1a",
+        "type": "canvas_color"
+      }
+    ],
+    "material_colors": [
+      {
+        "id": "647af46655ae4b8bbf14ae9e8e289208"
+      },
+      {
+        "id": "580acd7b496f4d6ea344a26decebba80"
+      },
+      {
+        "id": "a1e6dd4e2ce3488e9075ab931e9be443"
+      },
+      {
+        "id": "44844c3537bd4910b7f0ae3cf3bb02f1"
+      }
+    ],
+    "placeholder_infos": [
+      {
+        "id": "6701ec6ab70842df8b6f6840aa463703",
+        "meta_type": "none",
+        "type": "placeholder_info"
+      },
+      {
+        "id": "b1731c1050bf4e44bd0cf3932d7a40a5",
+        "meta_type": "none",
+        "type": "placeholder_info"
+      },
+      {
+        "id": "1ebb508c8ca54ce18c762b6044090929",
+        "meta_type": "none",
+        "type": "placeholder_info"
+      },
+      {
+        "id": "89a9ccceffaf45a2a88c4ab65a29ad18",
+        "meta_type": "none",
+        "type": "placeholder_info"
+      }
+    ],
+    "sound_channel_mappings": [
+      {
+        "id": "b32da61df06047519c905918612dedf8",
+        "type": ""
+      },
+      {
+        "id": "545a68ba16bf43199f2036339706fcb3",
+        "type": ""
+      },
+      {
+        "id": "b2e15fe23a274d3483b2df2b12289776",
+        "type": ""
+      },
+      {
+        "id": "f1e00d9f9e2e40099d0ced62aebdecfb",
+        "type": ""
+      }
+    ],
+    "speeds": [
+      {
+        "id": "0bc2bf66f8b84620a67c4ce2bc256533",
+        "type": "speed"
+      },
+      {
+        "id": "dd811956f2d14a16b05ebf313977f6af",
+        "type": "speed"
+      },
+      {
+        "id": "85820b85147a4a2b89bf61c1d69cabae",
+        "type": "speed"
+      },
+      {
+        "id": "8547630692ba4abba13770ae24dd4351",
+        "type": "speed"
+      }
+    ],
+    "videos": [
+      {
+        "beauty_face_auto_preset": {},
+        "category_name": "local",
+        "check_flag": 62978047,
+        "crop": {},
+        "duration": 14080000,
+        "height": 864,
+        "id": "b68a17244db24ec886a05cdb9bbe518e",
+        "material_id": "b68a17244db24ec886a05cdb9bbe518e",
+        "material_name": "embedded-template-clip.mp4",
+        "matting": {
+          "path": ""
+        },
+        "path": "C:\\__embedded_template__\\clip.mp4",
+        "stable": {
+          "time_range": {}
+        },
+        "type": "video",
+        "video_algorithm": {
+          "path": "",
+          "story_video_modify_video_config": {}
+        },
+        "video_mask_shadow": {
+          "path": "",
+          "resource_id": ""
+        },
+        "video_mask_stroke": {
+          "path": "",
+          "resource_id": "",
+          "type": ""
+        },
+        "width": 496
+      }
+    ],
+    "vocal_separations": [
+      {
+        "id": "46d944a45fa4409f958b020a1ea31ac6",
+        "type": "vocal_separation"
+      },
+      {
+        "id": "23dbf0591e374126b0079fa05f96da48",
+        "type": "vocal_separation"
+      },
+      {
+        "id": "ba8e985a20dd42f38513aa7b30a56e37",
+        "type": "vocal_separation"
+      },
+      {
+        "id": "261994209cd44b65bd6a7971c5cb093e",
+        "type": "vocal_separation"
+      }
+    ]
+  },
+  "name": "Template",
+  "new_version": "189.0.0",
+  "path": "",
+  "platform": {
+    "app_id": 3704,
+    "app_source": "lv",
+    "app_version": "5.9.0",
+    "device_id": "1e29327b35f06f4b222d943a152e10d6",
+    "hard_disk_id": "80207ee6fcca293d45c0f65b8d8fadc2",
+    "mac_address": "d8e64c3235f889d1c9580396cb000e1a",
+    "os": "windows",
+    "os_version": "10.0.22631"
+  },
+  "smart_ads_info": {},
+  "tracks": [
+    {
+      "id": "21d82580f6ab4e90aa7d65f395ab3eb5",
+      "name": "视频轨道",
+      "segments": [
+        {
+          "clip": {
+            "flip": {},
+            "scale": {
+              "x": 1.0,
+              "y": 1.0
+            },
+            "transform": {
+              "x": 0.0,
+              "y": 0.0
+            }
+          },
+          "extra_material_refs": [
+            "0bc2bf66f8b84620a67c4ce2bc256533",
+            "6701ec6ab70842df8b6f6840aa463703",
+            "708d832b21674ded915662abd074777e",
+            "b32da61df06047519c905918612dedf8",
+            "647af46655ae4b8bbf14ae9e8e289208",
+            "46d944a45fa4409f958b020a1ea31ac6"
+          ],
+          "hdr_settings": {
+            "mode": 1
+          },
+          "id": "c1c4c60981534026b084e14aa6234f9b",
+          "material_id": "b68a17244db24ec886a05cdb9bbe518e",
+          "render_timerange": {},
+          "responsive_layout": {},
+          "source": "segmentsourcenormal",
+          "source_timerange": {
+            "duration": 14080000,
+            "start": 0
+          },
+          "target_timerange": {
+            "duration": 14080000,
+            "start": 0
+          },
+          "uniform_scale": {}
+        }
+      ],
+      "type": "video"
+    }
+  ],
+  "uneven_animation_template_info": {},
+  "version": 360000
+}

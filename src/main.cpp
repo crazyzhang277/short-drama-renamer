@@ -16,6 +16,7 @@
 #include <vector>
 #include <regex>
 #include <algorithm>
+#include <map>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -34,8 +35,10 @@
 #include <thread>
 #include <functional>
 #include "renamer_core.h"
+#include "renamer_archives.h"
 #include "renamer_media.h"
 #include "renamer_ops.h"
+#include "jianying_draft.h"
 
 namespace fs = std::filesystem;
 using namespace renamer;
@@ -83,6 +86,24 @@ enum {
     IDC_ST_BTN_SCAN,
     IDC_ST_BTN_COPY,
     IDC_ST_REPORT,
+    IDC_AR_FOLDER,
+    IDC_AR_BROWSE,
+    IDC_AR_RECURSIVE,
+    IDC_AR_SCAN,
+    IDC_AR_RENAME,
+    IDC_AR_UNDO,
+    IDC_AR_LIST,
+    IDC_JY_SOURCE,
+    IDC_JY_SOURCE_BROWSE,
+    IDC_JY_OUTPUT,
+    IDC_JY_OUTPUT_BROWSE,
+    IDC_JY_MODE,
+    IDC_JY_LIMIT,
+    IDC_JY_REGEX,
+    IDC_JY_HINT,
+    IDC_JY_LIST,
+    IDC_JY_PREVIEW,
+    IDC_JY_GENERATE,
 };
 
 static const UINT_PTR IDT_REFRESH = 1;   // 自动刷新的防抖定时器
@@ -98,8 +119,12 @@ static HWND  g_hMain, g_hFolder, g_hBrowse, g_hList, g_hTitle, g_hStart, g_hPad,
 // 剧集统计页控件
 static HWND  g_stF1, g_stB1, g_stG1, g_stF2, g_stB2, g_stG2, g_stT1, g_stEp1, g_stDur1,
              g_stT2, g_stEp2, g_stDur2, g_stSpecial, g_stScan, g_stCopy, g_stReport;
+static HWND  g_arFolder, g_arBrowse, g_arRecursive, g_arHint, g_arScan, g_arRename, g_arUndo, g_arList;
+static HWND  g_jySource, g_jySourceBrowse, g_jyOutput, g_jyOutputBrowse,
+             g_jyMode, g_jyLimit, g_jyRegex,
+             g_jyHint, g_jyList, g_jyPreview, g_jyGenerate;
 static bool g_stT1Auto = false, g_stT2Auto = false;
-static int   g_page = 0;          // 0 = 批量改名，1 = 剧集统计
+static int   g_page = 0;          // 0 = 批量改名，1 = 剧集统计，2 = 压缩包改名，3 = 剪映草稿
 static HFONT g_fontUI, g_fontTitle, g_fontSub, g_fontBtn;
 static HBRUSH g_brBack;
 static int   g_dpi = 96;
@@ -138,7 +163,7 @@ static bool g_previewed = false;
 static bool g_titleAuto = false;   // 剧名当前是否由「自动识别」填入
 static bool g_suppress = false;    // 抑制程序化设置控件引发的自动刷新
 
-enum class MediaTaskKind { Duration, DramaStats };
+enum class MediaTaskKind { Duration, DramaStats, ArchiveScan, JianyingDraft };
 struct MediaTaskResult {
     MediaTaskKind kind = MediaTaskKind::Duration;
     std::wstring error;
@@ -152,7 +177,9 @@ struct MediaTaskResult {
     int fileCount = 0;
     int readableCount = 0;
     long totalSeconds = 0;
+    std::wstring info;
     std::vector<std::wstring> unreadableFiles;
+    std::vector<ArchiveScanItem> archiveItems;
 };
 struct MediaProgressMessage {
     size_t current = 0;
@@ -166,6 +193,18 @@ static bool g_mediaTaskActive = false;
 static bool g_closeAfterMediaTask = false;
 static MediaTaskKind g_mediaTaskKind = MediaTaskKind::Duration;
 static std::vector<std::pair<HWND, BOOL>> g_mediaControlStates;
+
+struct ArchivePreviewItem {
+    ArchiveScanItem scan;
+    fs::path target;
+    std::wstring episodeText;
+    std::wstring status;
+    bool canRename = false;
+    bool conflict = false;
+};
+static std::vector<ArchivePreviewItem> g_archivePlan;
+static std::vector<jianying_draft::Group> g_jyGroups;
+static bool g_jyPreviewed = false;
 
 // ------------------------------------------------------------------ 基础工具
 static std::wstring ExeDir() {
@@ -199,6 +238,14 @@ static void SetMediaControlsBusy(bool busy, MediaTaskKind kind) {
             controls.insert(controls.end(), { g_stF1, g_stB1, g_stG1, g_stF2, g_stB2, g_stG2, g_stT1,
                                               g_stEp1, g_stDur1, g_stT2, g_stEp2, g_stDur2,
                                               g_stSpecial, g_stCopy });
+        } else if (kind == MediaTaskKind::ArchiveScan) {
+            controls.insert(controls.end(), { g_arFolder, g_arBrowse, g_arRecursive,
+                                              g_arScan, g_arRename, g_arUndo });
+        } else if (kind == MediaTaskKind::JianyingDraft) {
+            controls.insert(controls.end(), { g_jySource, g_jySourceBrowse,
+                                              g_jyOutput, g_jyOutputBrowse,
+                                              g_jyMode, g_jyLimit, g_jyRegex, g_jyList,
+                                              g_jyPreview, g_jyGenerate });
         }
         for (HWND control : controls) {
             if (!control || !IsWindow(control)) continue;
@@ -220,31 +267,43 @@ static bool StartMediaTask(MediaTaskKind kind,
     g_closeAfterMediaTask = false;
     g_mediaTaskKind = kind;
     SetMediaControlsBusy(true, kind);
-    SetStatus(kind == MediaTaskKind::Duration ? L"正在后台统计视频时长…" : L"正在后台统计剧集信息…");
+    const wchar_t* taskText = kind == MediaTaskKind::Duration ? L"正在后台统计视频时长…" :
+                              kind == MediaTaskKind::DramaStats ? L"正在后台统计剧集信息…" :
+                              kind == MediaTaskKind::ArchiveScan ? L"正在后台读取压缩包内的集数…" :
+                              L"正在后台生成剪映草稿…";
+    SetStatus(taskText);
     try {
         g_mediaThread = std::thread([kind, work = std::move(work)]() mutable {
             auto result = std::make_unique<MediaTaskResult>();
             result->kind = kind;
-            HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-            if (FAILED(co)) {
-                result->error = L"后台线程初始化 COM 失败（系统错误 " +
-                                std::to_wstring((unsigned long)co) + L"）。";
-                result->error2 = result->error;
+            if (kind == MediaTaskKind::ArchiveScan) {
+                try {
+                    work(*result, g_mediaCancel);
+                } catch (...) {
+                    result->error = L"读取压缩包时发生异常。";
+                }
             } else {
-                HRESULT mf = MFStartup(MF_VERSION, MFSTARTUP_FULL);
-                if (FAILED(mf)) {
-                    result->error = L"后台线程初始化 Media Foundation 失败（系统错误 " +
-                                    std::to_wstring((unsigned long)mf) + L"）。";
+                HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+                if (FAILED(co)) {
+                    result->error = L"后台线程初始化 COM 失败（系统错误 " +
+                                    std::to_wstring((unsigned long)co) + L"）。";
                     result->error2 = result->error;
                 } else {
-                    try {
-                        work(*result, g_mediaCancel);
-                    } catch (...) {
-                        result->error = L"统计过程中发生异常。";
+                    HRESULT mf = MFStartup(MF_VERSION, MFSTARTUP_FULL);
+                    if (FAILED(mf)) {
+                        result->error = L"后台线程初始化 Media Foundation 失败（系统错误 " +
+                                        std::to_wstring((unsigned long)mf) + L"）。";
+                        result->error2 = result->error;
+                    } else {
+                        try {
+                            work(*result, g_mediaCancel);
+                        } catch (...) {
+                            result->error = L"统计过程中发生异常。";
+                        }
+                        MFShutdown();
                     }
-                    MFShutdown();
+                    CoUninitialize();
                 }
-                CoUninitialize();
             }
             result->cancelled = g_mediaCancel.load();
             if (!PostMessageW(g_hMain, WM_MEDIA_COMPLETE, 0, (LPARAM)result.get())) return;
@@ -303,6 +362,23 @@ static void SetupListColumns() {
     }
 }
 
+static void SetupArchiveListColumns() {
+    struct { const wchar_t* title; int width; } columns[] = {
+        { L"压缩包", S(320) },
+        { L"识别集数", S(120) },
+        { L"改名预览", S(360) },
+        { L"处理状态", S(240) },
+    };
+    for (int i = 0; i < 4; ++i) {
+        LVCOLUMNW column{};
+        column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+        column.pszText = (LPWSTR)columns[i].title;
+        column.cx = columns[i].width;
+        column.iSubItem = i;
+        ListView_InsertColumn(g_arList, i, &column);
+    }
+}
+
 static void FitListColumns() {
     RECT rc;
     GetClientRect(g_hList, &rc);
@@ -312,6 +388,18 @@ static void FitListColumns() {
     ListView_SetColumnWidth(g_hList, 0, w1);
     ListView_SetColumnWidth(g_hList, 1, w2);
     ListView_SetColumnWidth(g_hList, 2, w3);
+}
+
+static void FitArchiveListColumns() {
+    RECT rc{};
+    GetClientRect(g_arList, &rc);
+    int w1 = S(320), w2 = S(120), w4 = S(240);
+    int w3 = rc.right - w1 - w2 - w4 - S(20);
+    if (w3 < S(160)) w3 = S(160);
+    ListView_SetColumnWidth(g_arList, 0, w1);
+    ListView_SetColumnWidth(g_arList, 1, w2);
+    ListView_SetColumnWidth(g_arList, 2, w3);
+    ListView_SetColumnWidth(g_arList, 3, w4);
 }
 
 // ------------------------------------------------------------------ 表单取值
@@ -719,6 +807,198 @@ static void ApplyDramaScan(const MediaTaskResult& result) {
     SetStatus(status.empty() ? L"统计完成" : status);
 }
 
+static std::wstring ArchiveDisplayPath(const fs::path& path, const fs::path& root) {
+    std::error_code ec;
+    fs::path relative = fs::relative(path, root, ec);
+    return ec ? path.filename().wstring() : relative.wstring();
+}
+
+static void AddArchiveListRow(int row, const ArchivePreviewItem& item, const fs::path& root) {
+    std::wstring oldName = ArchiveDisplayPath(item.scan.source, root);
+    std::wstring newName = item.target.empty() ? L"—" : item.target.filename().wstring();
+    LVITEMW entry{};
+    entry.mask = LVIF_TEXT;
+    entry.iItem = row;
+    entry.iSubItem = 0;
+    entry.pszText = (LPWSTR)oldName.c_str();
+    ListView_InsertItem(g_arList, &entry);
+    ListView_SetItemText(g_arList, row, 1, (LPWSTR)item.episodeText.c_str());
+    ListView_SetItemText(g_arList, row, 2, (LPWSTR)newName.c_str());
+    ListView_SetItemText(g_arList, row, 3, (LPWSTR)item.status.c_str());
+}
+
+static void ClearArchivePreview() {
+    g_archivePlan.clear();
+    if (g_arList) ListView_DeleteAllItems(g_arList);
+}
+
+static void ShowArchiveScan(const std::vector<ArchiveScanItem>& items) {
+    ClearArchivePreview();
+    const fs::path root(Trim(GetText(g_arFolder)));
+    g_archivePlan.reserve(items.size());
+    for (const auto& scanned : items) {
+        ArchivePreviewItem item;
+        item.scan = scanned;
+        if (!scanned.error.empty()) {
+            item.episodeText = L"—";
+            item.status = scanned.error;
+        } else if (scanned.episodes.empty()) {
+            item.episodeText = L"未识别";
+            item.status = L"未识别到集数，跳过";
+        } else if (scanned.episodes.size() > 1) {
+            for (size_t i = 0; i < scanned.episodes.size(); ++i) {
+                if (i) item.episodeText += L"、";
+                item.episodeText += std::to_wstring(scanned.episodes[i]);
+            }
+            item.status = L"包含多个不同集数，跳过";
+        } else {
+            const long episode = scanned.episodes.front();
+            item.episodeText = std::to_wstring(episode);
+            item.target = scanned.source.parent_path() /
+                          (std::to_wstring(episode) + ArchiveSuffix(scanned.source));
+            item.canRename = true;
+            item.status = SamePath(scanned.source, item.target) ? L"名称已是集数" : L"待改名";
+        }
+        g_archivePlan.push_back(std::move(item));
+    }
+
+    std::map<std::wstring, std::vector<size_t>> targets;
+    std::map<std::wstring, size_t> movableSources;
+    for (size_t i = 0; i < g_archivePlan.size(); ++i) {
+        const auto& item = g_archivePlan[i];
+        if (!item.canRename) continue;
+        targets[PathKey(item.target)].push_back(i);
+        movableSources[PathKey(item.scan.source)] = i;
+    }
+    for (const auto& target : targets) {
+        if (target.second.size() > 1)
+            for (size_t i : target.second) g_archivePlan[i].conflict = true;
+    }
+    for (size_t i = 0; i < g_archivePlan.size(); ++i) {
+        auto& item = g_archivePlan[i];
+        std::error_code targetError;
+        bool targetExists = item.canRename && fs::exists(item.target, targetError) && !targetError;
+        if (!targetExists || SamePath(item.scan.source, item.target)) continue;
+        auto owner = movableSources.find(PathKey(item.target));
+        if (owner == movableSources.end()) item.conflict = true;
+    }
+
+    size_t canRename = 0, conflicts = 0;
+    for (size_t i = 0; i < g_archivePlan.size(); ++i) {
+        auto& item = g_archivePlan[i];
+        if (item.conflict) {
+            item.status = L"目标文件名重复或已存在，不能执行";
+            ++conflicts;
+        } else if (item.canRename) {
+            ++canRename;
+        }
+        AddArchiveListRow((int)i, item, root);
+    }
+    std::wstring status = L"扫描到 " + std::to_wstring(items.size()) + L" 个压缩包；可按单一集数改名 " +
+                          std::to_wstring(canRename) + L" 个";
+    if (conflicts) status += L"；有 " + std::to_wstring(conflicts) + L" 个命名冲突";
+    SetStatus(status);
+}
+
+static void DoScanArchives() {
+    ClearArchivePreview();
+    std::wstring folder = Trim(GetText(g_arFolder));
+    std::error_code ec;
+    if (folder.empty() || !fs::is_directory(folder, ec)) {
+        MessageBoxW(g_hMain, L"请先选择压缩包所在的文件夹。", L"压缩包改名", MB_ICONWARNING);
+        return;
+    }
+    const fs::path root(folder);
+    const bool recursive = SendMessageW(g_arRecursive, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    StartMediaTask(MediaTaskKind::ArchiveScan,
+        [root, recursive](MediaTaskResult& result, const std::atomic<bool>& cancel) {
+            ScanArchiveDirectory(root, recursive, result.archiveItems, cancel,
+                [](size_t current, size_t total) {
+                    if ((current % 4) == 0 || current == total)
+                        PostMediaProgress(current, total, L"压缩包");
+                }, result.error);
+        });
+}
+
+static void DoRenameArchives() {
+    const fs::path root(Trim(GetText(g_arFolder)));
+    if (root.empty() || g_archivePlan.empty()) {
+        MessageBoxW(g_hMain, L"请先选择文件夹并扫描压缩包。", L"压缩包改名", MB_ICONWARNING);
+        return;
+    }
+    std::vector<PlanItem> plan;
+    size_t conflicts = 0;
+    size_t pending = 0;
+    for (const auto& item : g_archivePlan) {
+        if (!item.canRename) continue;
+        if (item.conflict) { ++conflicts; continue; }
+        if (!SamePath(item.scan.source, item.target)) ++pending;
+        PlanItem rename;
+        rename.src = item.scan.source;
+        rename.target = item.target;
+        rename.relativeSrc = fs::relative(item.scan.source, root);
+        rename.oldName = item.scan.source.filename().wstring();
+        rename.newName = item.target.filename().wstring();
+        plan.push_back(std::move(rename));
+    }
+    if (conflicts) {
+        MessageBoxW(g_hMain,
+            (L"有 " + std::to_wstring(conflicts) + L" 个目标名称重复或已存在，请先处理冲突再执行。\n\n未识别出唯一集数的压缩包会自动跳过。").c_str(),
+            L"压缩包改名", MB_ICONWARNING);
+        return;
+    }
+    if (plan.empty()) {
+        MessageBoxW(g_hMain, L"没有可改名的压缩包。每个压缩包必须能识别出一个不同的集数。",
+                    L"压缩包改名", MB_ICONINFORMATION);
+        return;
+    }
+    if (pending == 0) {
+        MessageBoxW(g_hMain, L"符合条件的压缩包已经都是数字文件名，无需改名。",
+                    L"压缩包改名", MB_ICONINFORMATION);
+        return;
+    }
+    if (MessageBoxW(g_hMain,
+        (L"将把 " + std::to_wstring(pending) + L" 个压缩包改成对应的纯数字集数文件名。\n"
+         L"无法识别出唯一集数的压缩包会跳过。\n\n确认执行？").c_str(),
+        L"确认压缩包改名", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+
+    OperationResult renamed = ExecuteRename(root, plan);
+    if (!renamed.ok) {
+        std::wstring message = renamed.message.empty() ? L"压缩包改名失败。" : renamed.message;
+        SetStatus(L"压缩包改名失败：" + message);
+        MessageBoxW(g_hMain, message.c_str(), L"压缩包改名失败", MB_ICONERROR);
+        return;
+    }
+    InvalidateScanCache();
+    SetStatus(L"压缩包改名完成：成功 " + std::to_wstring(renamed.changed) + L" 个；可用「撤销上次」还原");
+    MessageBoxW(g_hMain,
+        (L"压缩包改名完成：成功 " + std::to_wstring(renamed.changed) + L" 个。\n"
+         L"可在本页点「撤销上次」恢复原名。").c_str(),
+        L"完成", MB_ICONINFORMATION);
+    DoScanArchives();
+}
+
+static void DoUndoArchives() {
+    const fs::path root(Trim(GetText(g_arFolder)));
+    std::error_code ec;
+    if (root.empty() || !fs::is_directory(root, ec)) {
+        MessageBoxW(g_hMain, L"请先选择压缩包所在的文件夹。", L"撤销压缩包改名", MB_ICONWARNING);
+        return;
+    }
+    if (MessageBoxW(g_hMain, L"将撤销此文件夹内最近一次改名操作。\n\n确定？",
+                    L"撤销压缩包改名", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+    OperationResult undone = UndoLatest(root);
+    if (!undone.ok) {
+        std::wstring message = undone.message.empty() ? L"撤销失败。" : undone.message;
+        SetStatus(L"撤销失败：" + message);
+        MessageBoxW(g_hMain, message.c_str(), L"撤销失败", MB_ICONERROR);
+        return;
+    }
+    InvalidateScanCache();
+    SetStatus(L"已还原 " + std::to_wstring(undone.changed) + L" 个文件");
+    DoScanArchives();
+}
+
 static void CompleteMediaTask(MediaTaskResult* raw) {
     std::unique_ptr<MediaTaskResult> result(raw);
     if (g_mediaThread.joinable()) g_mediaThread.join();
@@ -728,7 +1008,36 @@ static void CompleteMediaTask(MediaTaskResult* raw) {
         DestroyWindow(g_hMain);
         return;
     }
-    if (result->cancelled) { SetStatus(L"统计已取消"); return; }
+    if (result->cancelled) {
+        SetStatus(result->kind == MediaTaskKind::ArchiveScan ? L"压缩包扫描已取消" :
+                  result->kind == MediaTaskKind::JianyingDraft ? L"剪映草稿生成已取消" : L"统计已取消");
+        return;
+    }
+    if (result->kind == MediaTaskKind::ArchiveScan) {
+        if (!result->error.empty() && result->archiveItems.empty()) {
+            SetStatus(result->error);
+            MessageBoxW(g_hMain, result->error.c_str(), L"压缩包扫描", MB_ICONWARNING);
+            return;
+        }
+        if (result->archiveItems.empty()) {
+            SetStatus(L"没有找到压缩包");
+            MessageBoxW(g_hMain, L"所选目录中没有找到支持的压缩包（ZIP、RAR、7Z、TAR）。",
+                        L"压缩包扫描", MB_ICONINFORMATION);
+            return;
+        }
+        ShowArchiveScan(result->archiveItems);
+        return;
+    }
+    if (result->kind == MediaTaskKind::JianyingDraft) {
+        if (!result->error.empty()) {
+            SetStatus(L"剪映草稿生成失败：" + result->error);
+            MessageBoxW(g_hMain, result->error.c_str(), L"剪映草稿生成", MB_ICONWARNING);
+        } else {
+            SetStatus(L"剪映草稿已生成（" + std::to_wstring(result->fileCount) + L" 个）");
+            MessageBoxW(g_hMain, result->info.c_str(), L"剪映草稿生成完成", MB_ICONINFORMATION);
+        }
+        return;
+    }
     if (!result->error.empty() && result->kind == MediaTaskKind::Duration) {
         MessageBoxW(g_hMain, result->error.c_str(), L"统计总时长", MB_ICONWARNING);
         SetStatus(result->error);
@@ -770,7 +1079,7 @@ static bool ApplyStatsNameGuess(bool first, const std::wstring& folder, bool ove
 
 
 // ------------------------------------------------------------------ 选文件夹
-static bool PickFolder(std::wstring& out) {
+static bool PickFolder(std::wstring& out, const wchar_t* title = L"选择视频文件夹") {
     IFileOpenDialog* pDlg = nullptr;
     HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
                                   IID_PPV_ARGS(&pDlg));
@@ -778,7 +1087,7 @@ static bool PickFolder(std::wstring& out) {
         DWORD opts = 0;
         pDlg->GetOptions(&opts);
         pDlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
-        pDlg->SetTitle(L"选择视频文件夹");
+        pDlg->SetTitle(title);
         bool got = false;
         if (SUCCEEDED(pDlg->Show(g_hMain))) {
             IShellItem* pItem = nullptr;
@@ -798,7 +1107,7 @@ static bool PickFolder(std::wstring& out) {
 
     BROWSEINFOW bi = {};
     bi.hwndOwner = g_hMain;
-    bi.lpszTitle = L"选择视频文件夹";
+    bi.lpszTitle = title;
     bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
     LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
     if (!pidl) return false;
@@ -807,6 +1116,135 @@ static bool PickFolder(std::wstring& out) {
     CoTaskMemFree(pidl);
     if (ok) out = path;
     return ok;
+}
+
+static void ClearDraftPreview(bool showStatus = true) {
+    g_jyGroups.clear();
+    g_jyPreviewed = false;
+    if (g_jyList && IsWindow(g_jyList)) ListView_DeleteAllItems(g_jyList);
+    if (showStatus && g_hStatus) SetStatus(L"设置已更改，请重新预览分组。");
+}
+
+static void FitDraftColumns() {
+    if (!g_jyList || !IsWindow(g_jyList)) return;
+    RECT rc{};
+    GetClientRect(g_jyList, &rc);
+    int width = rc.right - rc.left;
+    ListView_SetColumnWidth(g_jyList, 0, S(190));
+    ListView_SetColumnWidth(g_jyList, 1, S(82));
+    ListView_SetColumnWidth(g_jyList, 2, std::max(S(240), width - S(292)));
+}
+
+static bool ReadDraftOptions(jianying_draft::BuildOptions& options,
+                             jianying_draft::GroupMode& mode, std::wstring& error) {
+    options.sourceRoot = Trim(GetText(g_jySource));
+    options.outputRoot = Trim(GetText(g_jyOutput));
+    options.filenameRegex = Trim(GetText(g_jyRegex));
+    const int selected = (int)SendMessageW(g_jyMode, CB_GETCURSEL, 0, 0);
+    mode = selected == 1 ? jianying_draft::GroupMode::FilenameRegex :
+           selected == 2 ? jianying_draft::GroupMode::AllFiles : jianying_draft::GroupMode::Folders;
+    const std::wstring limit = Trim(GetText(g_jyLimit));
+    wchar_t* end = nullptr;
+    unsigned long value = wcstoul(limit.c_str(), &end, 10);
+    if (limit.empty() || !end || *end != L'\0' || value < 1 || value > 500) {
+        error = L"每个草稿的时间线数量需填写 1 到 500 之间的整数。";
+        return false;
+    }
+    options.timelinesPerDraft = value;
+    if (options.sourceRoot.empty() || options.outputRoot.empty()) {
+        error = L"请先选择素材目录和输出目录。";
+        return false;
+    }
+    return true;
+}
+
+static void DoDraftPreview() {
+    jianying_draft::BuildOptions options;
+    jianying_draft::GroupMode mode;
+    std::wstring error;
+    if (!ReadDraftOptions(options, mode, error)) {
+        ClearDraftPreview(false);
+        SetStatus(error);
+        MessageBoxW(g_hMain, error.c_str(), L"剪映草稿预览", MB_ICONWARNING);
+        return;
+    }
+    std::vector<jianying_draft::Group> groups;
+    if (!jianying_draft::ScanGroups(options.sourceRoot, mode, options.filenameRegex, groups, error)) {
+        ClearDraftPreview(false);
+        SetStatus(error);
+        MessageBoxW(g_hMain, error.c_str(), L"剪映草稿预览", MB_ICONWARNING);
+        return;
+    }
+    g_jyGroups = std::move(groups);
+    g_jyPreviewed = true;
+    ListView_DeleteAllItems(g_jyList);
+    size_t total = 0;
+    for (size_t i = 0; i < g_jyGroups.size(); ++i) {
+        const auto& group = g_jyGroups[i];
+        total += group.clips.size();
+        LVITEMW item{};
+        item.mask = LVIF_TEXT;
+        item.iItem = (int)i;
+        item.pszText = const_cast<LPWSTR>(group.name.c_str());
+        int row = ListView_InsertItem(g_jyList, &item);
+        std::wstring count = std::to_wstring(group.clips.size());
+        std::wstring clipNames;
+        for (const auto& clip : group.clips) {
+            if (!clipNames.empty()) clipNames += L" → ";
+            clipNames += clip.filename().wstring();
+        }
+        ListView_SetItemText(g_jyList, row, 1, const_cast<LPWSTR>(count.c_str()));
+        ListView_SetItemText(g_jyList, row, 2, const_cast<LPWSTR>(clipNames.c_str()));
+    }
+    const size_t batchCount = (g_jyGroups.size() + options.timelinesPerDraft - 1) /
+                              options.timelinesPerDraft;
+    SetStatus(L"预览完成：" + std::to_wstring(g_jyGroups.size()) + L" 条时间线，" +
+              std::to_wstring(total) + L" 个视频，将生成 " + std::to_wstring(batchCount) + L" 个草稿。");
+}
+
+static void DoGenerateDrafts() {
+    if (!g_jyPreviewed || g_jyGroups.empty()) {
+        MessageBoxW(g_hMain, L"请先点「预览分组」，确认时间线名称和片段顺序。",
+                    L"剪映草稿生成", MB_ICONWARNING);
+        return;
+    }
+    jianying_draft::BuildOptions options;
+    jianying_draft::GroupMode mode;
+    std::wstring error;
+    if (!ReadDraftOptions(options, mode, error)) {
+        MessageBoxW(g_hMain, error.c_str(), L"剪映草稿生成", MB_ICONWARNING);
+        return;
+    }
+    size_t clips = 0;
+    for (const auto& group : g_jyGroups) clips += group.clips.size();
+    const size_t parts = (g_jyGroups.size() + options.timelinesPerDraft - 1) /
+                         options.timelinesPerDraft;
+    std::wstring confirm = L"将生成 " + std::to_wstring(parts) + L" 个剪映草稿，包含 " +
+        std::to_wstring(g_jyGroups.size()) + L" 条时间线和 " + std::to_wstring(clips) +
+        L" 个视频片段。\n\n每条时间线使用一条视频轨，按预览顺序首尾相接。\n"
+        L"不会生成封面图，也不会覆盖已有草稿。\n\n确认继续？";
+    if (MessageBoxW(g_hMain, confirm.c_str(), L"确认生成", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+
+    std::vector<jianying_draft::Group> groups = g_jyGroups;
+    if (!StartMediaTask(MediaTaskKind::JianyingDraft,
+        [options, groups = std::move(groups)](MediaTaskResult& result, const std::atomic<bool>& cancel) {
+            std::vector<fs::path> outputs;
+            std::wstring error;
+            const bool ok = jianying_draft::Generate(options, groups, cancel,
+                [](size_t current, size_t total, const std::wstring& label) {
+                    PostMediaProgress(current, total, label.c_str());
+                }, outputs, error);
+            result.error = ok ? L"" : error;
+            result.fileCount = (int)outputs.size();
+            if (ok) {
+                result.info = L"已生成 " + std::to_wstring(outputs.size()) + L" 个草稿：\n\n";
+                for (const auto& path : outputs) result.info += path.wstring() + L"\n";
+                result.info += L"\n可在剪映中手动打开这些草稿验证。";
+            }
+        })) {
+        MessageBoxW(g_hMain, L"当前已有后台任务在运行，请完成后再生成。",
+                    L"剪映草稿生成", MB_ICONINFORMATION);
+    }
 }
 
 // ------------------------------------------------------------------ 剪贴板
@@ -848,14 +1286,21 @@ static void SaveSettings() {
     put("start",  Trim(GetText(g_hStart)));
     put("pad",    Trim(GetText(g_hPad)));
     put("custom", Trim(GetText(g_hCustom)));
+    put("archiveFolder", Trim(GetText(g_arFolder)));
+    put("jySource", Trim(GetText(g_jySource)));
+    put("jyOutput", Trim(GetText(g_jyOutput)));
+    put("jyLimit", Trim(GetText(g_jyLimit)));
+    put("jyRegex", Trim(GetText(g_jyRegex)));
 
     wchar_t b[16] = {0};
     swprintf(b, 16, L"%d", (int)SendMessageW(g_hSort,  CB_GETCURSEL, 0, 0)); put("sort",  b);
     swprintf(b, 16, L"%d", (int)SendMessageW(g_hTag,   CB_GETCURSEL, 0, 0)); put("tag",   b);
     swprintf(b, 16, L"%d", (int)SendMessageW(g_hColon, CB_GETCURSEL, 0, 0)); put("colon", b);
+    swprintf(b, 16, L"%d", (int)SendMessageW(g_jyMode, CB_GETCURSEL, 0, 0)); put("jyMode", b);
     put("sub", SendMessageW(g_hSub, BM_GETCHECK, 0, 0) == BST_CHECKED ? L"1" : L"0");
     put("auto", SendMessageW(g_hAuto, BM_GETCHECK, 0, 0) == BST_CHECKED ? L"1" : L"0");
     put("keepep", SendMessageW(g_hKeepEp, BM_GETCHECK, 0, 0) == BST_CHECKED ? L"1" : L"0");
+    put("archiveSub", SendMessageW(g_arRecursive, BM_GETCHECK, 0, 0) == BST_CHECKED ? L"1" : L"0");
 
     std::wstring error;
     WriteUtf8Atomic(SettingsPath(), body, error);
@@ -895,6 +1340,13 @@ static void LoadSettings() {
         else if (k == L"sub")    SendMessageW(g_hSub, BM_SETCHECK, v == L"1" ? BST_CHECKED : BST_UNCHECKED, 0);
         else if (k == L"auto")   SendMessageW(g_hAuto, BM_SETCHECK, v == L"1" ? BST_CHECKED : BST_UNCHECKED, 0);
         else if (k == L"keepep") SendMessageW(g_hKeepEp, BM_SETCHECK, v == L"1" ? BST_CHECKED : BST_UNCHECKED, 0);
+        else if (k == L"archiveFolder") SetWindowTextW(g_arFolder, v.c_str());
+        else if (k == L"archiveSub") SendMessageW(g_arRecursive, BM_SETCHECK, v == L"1" ? BST_CHECKED : BST_UNCHECKED, 0);
+        else if (k == L"jySource") SetWindowTextW(g_jySource, v.c_str());
+        else if (k == L"jyOutput") SetWindowTextW(g_jyOutput, v.c_str());
+        else if (k == L"jyLimit") SetWindowTextW(g_jyLimit, v.c_str());
+        else if (k == L"jyRegex") SetWindowTextW(g_jyRegex, v.c_str());
+        else if (k == L"jyMode") SendMessageW(g_jyMode, CB_SETCURSEL, _wtoi(v.c_str()), 0);
     }
     if (migrateLegacy) SaveSettings();
 }
@@ -936,6 +1388,7 @@ static void LayoutStats(int W, int H) {
     int btnH = S(38);
     MoveWindow(g_stScan, m, y, S(116), btnH, TRUE);
     MoveWindow(g_stCopy, m + S(116) + S(10), y, S(116), btnH, TRUE);
+    MoveWindow(g_hHelp, right - S(96), y, S(96), btnH, TRUE);
     y += btnH + S(10);
 
     int bottom = H - S(40);
@@ -946,11 +1399,75 @@ static void LayoutStats(int W, int H) {
     InvalidateRect(g_hMain, nullptr, FALSE);
 }
 
+static void LayoutArchives(int W, int H) {
+    int m = S(16);
+    int bx = m + S(LBL_W);
+    int y = S(HEADER_H) + S(TAB_H) + S(14);
+    int right = W - m;
+
+    MoveWindow(g_arFolder, bx, y, right - bx - S(96), S(28), TRUE);
+    MoveWindow(g_arBrowse, right - S(88), y, S(88), S(28), TRUE);
+    y += S(38);
+
+    MoveWindow(g_arRecursive, bx, y + S(4), S(152), S(22), TRUE);
+    MoveWindow(g_arHint, bx + S(160), y + S(2), right - bx - S(160), S(26), TRUE);
+    y += S(36);
+
+    int btnH = S(38);
+    int listTop = y;
+    int listH = H - listTop - btnH - S(50);
+    if (listH < S(140)) listH = S(140);
+    MoveWindow(g_arList, m, listTop, W - m * 2, listH, TRUE);
+    FitArchiveListColumns();
+
+    int by = listTop + listH + S(12);
+    int x = m;
+    MoveWindow(g_arScan, x, by, S(124), btnH, TRUE); x += S(134);
+    MoveWindow(g_arRename, x, by, S(140), btnH, TRUE); x += S(150);
+    MoveWindow(g_arUndo, x, by, S(116), btnH, TRUE);
+    MoveWindow(g_hHelp, right - S(96), by, S(96), btnH, TRUE);
+
+    MoveWindow(g_hStatus, m, H - S(32), W - m * 2, S(22), TRUE);
+    InvalidateRect(g_hMain, nullptr, FALSE);
+}
+
+static void LayoutDrafts(int W, int H) {
+    int m = S(16), bx = m + S(LBL_W), right = W - m;
+    int y = S(HEADER_H) + S(TAB_H) + S(14), rowH = S(28), rowGap = S(10);
+    const int browseW = S(88);
+    MoveWindow(g_jySource, bx, y, right - bx - browseW - S(8), rowH, TRUE);
+    MoveWindow(g_jySourceBrowse, right - browseW, y, browseW, rowH, TRUE);
+    y += rowH + rowGap;
+    MoveWindow(g_jyOutput, bx, y, right - bx - browseW - S(8), rowH, TRUE);
+    MoveWindow(g_jyOutputBrowse, right - browseW, y, browseW, rowH, TRUE);
+    y += rowH + rowGap;
+    MoveWindow(g_jyMode, bx, y, S(250), rowH, TRUE);
+    MoveWindow(g_jyLimit, bx + S(405), y, S(72), rowH, TRUE);
+    y += rowH + rowGap;
+    MoveWindow(g_jyRegex, bx, y, right - bx, rowH, TRUE);
+    MoveWindow(g_jyHint, bx, y + rowH + S(2), right - bx, S(18), TRUE);
+    y += rowH + S(24);
+
+    int btnH = S(38), listTop = y;
+    int listH = H - listTop - btnH - S(50);
+    if (listH < S(100)) listH = S(100);
+    MoveWindow(g_jyList, m, listTop, W - m * 2, listH, TRUE);
+    FitDraftColumns();
+    int by = listTop + listH + S(12);
+    MoveWindow(g_jyPreview, m, by, S(132), btnH, TRUE);
+    MoveWindow(g_jyGenerate, m + S(142), by, S(156), btnH, TRUE);
+    MoveWindow(g_hHelp, right - S(96), by, S(96), btnH, TRUE);
+    MoveWindow(g_hStatus, m, H - S(32), W - m * 2, S(22), TRUE);
+    InvalidateRect(g_hMain, nullptr, FALSE);
+}
+
 static void Layout(HWND hwnd) {
     RECT rc;
     GetClientRect(hwnd, &rc);
     int W = rc.right, H = rc.bottom;
     if (g_page == 1) { LayoutStats(W, H); return; }
+    if (g_page == 2) { LayoutArchives(W, H); return; }
+    if (g_page == 3) { LayoutDrafts(W, H); return; }
     int m = S(16);
     int y = S(HEADER_H) + S(TAB_H) + S(14);
     int bx = m + S(LBL_W);
@@ -982,7 +1499,7 @@ static void Layout(HWND hwnd) {
     MoveWindow(g_hColon, xb, y, S(130), S(200), TRUE);
     y += S(38);
 
-    // 行4 自定义标签 / 自动刷新 / 沿用原集数 / 使用教程
+    // 行4 自定义标签 / 自动刷新 / 沿用原集数 / 本页教程
     MoveWindow(g_hCustom, bx, y, S(320), S(28), TRUE);
     int xc = bx + S(320) + S(20);
     MoveWindow(g_hAuto,   xc, y + S(4), S(112), S(22), TRUE);
@@ -1036,7 +1553,7 @@ static void DrawHeader(HDC hdc, RECT rc) {
     SelectObject(hdc, g_fontSub);
     SetTextColor(hdc, RGB(147, 178, 232));
     RECT s = { S(22), S(36), W - S(20), S(36) + S(20) };
-    DrawTextW(hdc, L"按集数顺序批量重命名 · 自动追加标签 · 支持一键撤销", -1, &s,
+    DrawTextW(hdc, L"视频与压缩包按集数改名 · 预览后执行 · 支持一键撤销", -1, &s,
               DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     SelectObject(hdc, old);
 }
@@ -1082,10 +1599,10 @@ static void DrawTabs(HDC hdc, const RECT& rc) {
     FillRect(hdc, &line, lb);
     DeleteObject(lb);
 
-    const wchar_t* names[2] = { L"批量改名", L"剧集统计" };
+    const wchar_t* names[4] = { L"批量改名", L"剧集统计", L"压缩包改名", L"剪映草稿生成" };
     SetBkMode(hdc, TRANSPARENT);
     HFONT old = (HFONT)SelectObject(hdc, g_fontUI);
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < 4; ++i) {
         RECT r = TabRect(i);
         bool on = (g_page == i);
         SetTextColor(hdc, on ? RGB(15, 23, 42) : RGB(100, 116, 139));
@@ -1133,18 +1650,61 @@ static void DrawStatsLabels(HDC hdc, HWND hwnd) {
     SelectObject(hdc, old);
 }
 
+static void DrawArchiveLabels(HDC hdc, HWND hwnd) {
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, RGB(71, 85, 105));
+    HFONT old = (HFONT)SelectObject(hdc, g_fontUI);
+    RECT r{};
+    GetWindowRect(g_arFolder, &r);
+    MapWindowPoints(HWND_DESKTOP, hwnd, (POINT*)&r, 2);
+    RECT label = { r.left - S(LBL_W) - S(2), r.top, r.left - S(8), r.bottom };
+    DrawTextW(hdc, L"压缩包目录", -1, &label, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+    SelectObject(hdc, old);
+}
+
+static void DrawDraftLabels(HDC hdc, HWND hwnd) {
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, RGB(71, 85, 105));
+    HFONT old = (HFONT)SelectObject(hdc, g_fontUI);
+    auto labelAt = [&](HWND control, const wchar_t* text) {
+        RECT r{};
+        GetWindowRect(control, &r);
+        MapWindowPoints(HWND_DESKTOP, hwnd, (POINT*)&r, 2);
+        RECT label = { r.left - S(LBL_W) - S(2), r.top, r.left - S(8), r.bottom };
+        DrawTextW(hdc, text, -1, &label, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+    };
+    labelAt(g_jySource, L"素材目录");
+    labelAt(g_jyOutput, L"输出目录");
+    labelAt(g_jyMode, L"分组方式");
+    labelAt(g_jyRegex, L"文件名正则");
+    RECT limit{};
+    GetWindowRect(g_jyLimit, &limit);
+    MapWindowPoints(HWND_DESKTOP, hwnd, (POINT*)&limit, 2);
+    RECT limitLabel = { limit.left - S(104), limit.top, limit.left - S(8), limit.bottom };
+    DrawTextW(hdc, L"每稿时间线", -1, &limitLabel, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+    SelectObject(hdc, old);
+}
+
 // ------------------------------------------------------------------ 页切换
 static void ShowPage(HWND hwnd, int page) {
     g_page = page;
     HWND renameCtl[] = { g_hFolder, g_hBrowse, g_hTitle, g_hStart, g_hPad, g_hSub,
                          g_hSort, g_hTag, g_hCustom, g_hColon, g_hList, g_hPreview,
                          g_hRename, g_hUndo, g_hTitles, g_hOpen, g_hGuess, g_hAuto,
-                         g_hKeepEp, g_hHelp, g_hDuration };
+                         g_hKeepEp, g_hDuration };
     HWND statsCtl[] = { g_stF1, g_stB1, g_stG1, g_stF2, g_stB2, g_stG2, g_stT1, g_stEp1,
                         g_stDur1, g_stT2, g_stEp2, g_stDur2, g_stSpecial, g_stScan,
                         g_stCopy, g_stReport };
+    HWND archiveCtl[] = { g_arFolder, g_arBrowse, g_arRecursive, g_arHint,
+                          g_arScan, g_arRename, g_arUndo, g_arList };
+    HWND draftCtl[] = { g_jySource, g_jySourceBrowse, g_jyOutput, g_jyOutputBrowse,
+                        g_jyMode, g_jyLimit, g_jyRegex,
+                        g_jyHint, g_jyList, g_jyPreview, g_jyGenerate };
     for (HWND h : renameCtl) ShowWindow(h, page == 0 ? SW_SHOW : SW_HIDE);
     for (HWND h : statsCtl)  ShowWindow(h, page == 1 ? SW_SHOW : SW_HIDE);
+    for (HWND h : archiveCtl) ShowWindow(h, page == 2 ? SW_SHOW : SW_HIDE);
+    for (HWND h : draftCtl) ShowWindow(h, page == 3 ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hHelp, SW_SHOW);
 
     if (page == 1) {
         // 改名页已经选好文件夹/剧名的，直接带过来当「海外」
@@ -1164,87 +1724,42 @@ static void ShowPage(HWND hwnd, int page) {
 }
 
 // ------------------------------------------------------------------ 使用教程窗口
-static const wchar_t* kTutorialText =
-L"短剧视频批量更名工具 · 使用教程\r\n"
-L"\r\n"
-L"一、这个工具做什么\r\n"
-L"    把一个文件夹里的短剧视频，按集数顺序批量改名成统一格式：\r\n"
-L"    剧名 - 序号 #short drama #mini drama #micro drama #类型标签\r\n"
-L"    例：Dignity Reborn - 1 #short drama #mini drama #micro drama #Billionaire boss\r\n"
-L"\r\n"
-L"二、五步搞定\r\n"
-L"    1. 点「浏览...」选中放视频的文件夹（也可以直接把文件夹拖进窗口）。\r\n"
-L"    2. 填「剧名」，或点「识别剧名」从文件夹名自动认出来。\r\n"
-L"    3. 在「类型标签」里选一个；选「自定义」时在下方输入框自己写。\r\n"
-L"    4. 看一眼下方预览列表：左边是原文件名，右边是新文件名。\r\n"
-L"    5. 确认没问题，点「执行改名」。\r\n"
-L"\r\n"
-L"三、各项设置说明\r\n"
-L"    视频文件夹：要处理的目录。默认只处理这一层，勾「包含子文件夹」会往下钻。\r\n"
-L"    剧名：最终文件名的开头部分。中文标点会自动转成英文标点。\r\n"
-L"    起始序号：第一个视频的编号，一般填 1。\r\n"
-L"    补零位数：填 2 就是 01、02；填 0 就是 1、2。\r\n"
-L"    沿用原集数：默认不勾。不勾时按顺序连续编号，原始集数断档会被接上\r\n"
-L"        （手上有 1 2 3 8 9 10 11，会变成 01 02 03 04 05 06 07）。\r\n"
-L"        勾上则沿用从文件名里认出的集数，断档保留（8 还是 8，9 还是 9）。\r\n"
-L"        认不出集数的文件会退回按顺序编号。\r\n"
-L"        注意：勾上后如果两个文件认出同一个集数（例如 EP08.mp4 和 第8集.mp4），\r\n"
-L"        预览列表里这两行会标红并加「重名」前缀，点「执行改名」会被拦下。\r\n"
-L"        这时把重复的片子移走，或者勾掉「沿用原集数」改回连续编号即可。\r\n"
-L"    排序方式：\r\n"
-L"        · 自动识别集数 —— 优先从文件名里抠出集数（S01E05、第3集、EP12、[05]、结尾数字都认）。\r\n"
-L"          认出的比例够高就按集数排，否则退回文件名自然排序。\r\n"
-L"        · 文件名自然排序 —— 纯按名字排，1、2、10 会正确排在 2 后面。\r\n"
-L"        · 修改时间 —— 按文件最后修改时间排，适合文件名完全没规律的素材。\r\n"
-L"    冒号处理：Windows 文件名不允许英文冒号，默认换成全角「：」。\r\n"
-L"        选「短横线 -」或「空格」则换成对应的符号。\r\n"
-L"    自定义标签：只在自己写标签时用，不需要带 # 号。\r\n"
-L"    改动即时预览：勾上后，改任何设置都会自动刷新预览，不用反复点「预览」。\r\n"
-L"    「统计总时长」按钮：按当前的「视频文件夹」和「包含子文件夹」，把里面所有视频的时长加起来。\r\n"
-L"        时长靠系统自带的解码器读，flv、rmvb 这类系统不认识的格式会读不到，弹窗里会单独列出来。\r\n"
-L"\r\n"
-L"四、识别剧名的规则\r\n"
-L"    从文件夹路径最里层往外找，跳过这些没意义的名字：\r\n"
-L"        盘符（C: D: E:）、Users、Desktop、Documents、Downloads、Videos、\r\n"
-L"        视频、短剧、影视、素材、新建文件夹、下载、桌面 ……\r\n"
-L"    遇到像剧名的目录名就拿来用；英文会自动首字母大写，下划线和点换成空格。\r\n"
-L"    找不到时不会乱填，会弹提示让你手动输入。\r\n"
-L"\r\n"
-L"五、剧集统计（生成报送文案）\r\n"
-L"    顶部有两个页签：批量改名、剧集统计。点「剧集统计」切过去。\r\n"
-L"    原剧文件夹：原版短剧放的目录。\r\n"
-L"    海外文件夹：海外转译版放的目录。\r\n"
-L"    填好点「统计信息」，两边各扫一遍，自动算出集数和总时长。\r\n"
-L"    选文件夹时会按目录名尝试识别剧名；也能点旁边的「智能识别」重新识别。\r\n"
-L"    括号中的内容会保留在剧名里；认错了可直接修改剧名，集数、时长也能手改。\r\n"
-L"    特殊情况按海外剧的每集时长自动判断：哪几集满 1 分钟、其余几集不满 1 分钟、区间多少秒。\r\n"
-L"    下方大框就是报送文案，格式固定（原剧 / 集数 / 时长 / 海外转译后 / 特殊情况），\r\n"
-L"    改上面任何一格都会立刻同步。点「复制文案」直接粘给对接的人。\r\n"
-L"    两个文件夹填成同一个也行，只扫一次。\r\n"
-L"\r\n"
-L"六、安全机制\r\n"
-L"    · 先预览后执行，改名前能看到每一个结果。\r\n"
-L"    · 重名、目标已存在、路径过长、非法字符，都会在预览阶段拦住。\r\n"
-L"    · 改名分两步走（先临时名再目标名），中途失败会自动回滚。\r\n"
-L"    · 每次改名都在文件夹下留一份 .rename-tool\\undo-时间.txt 记录。\r\n"
-L"    · 点「撤销上次」可以完整还原，多次改名就多按几次。\r\n"
-L"    · 「复制标题清单」把带英文冒号的完整标题复制到剪贴板，方便贴到别处。\r\n"
-L"\r\n"
-L"七、常见问题\r\n"
-L"    问：改完发现剧名填错了怎么办？\r\n"
-L"    答：点「撤销上次」还原，改好剧名重新执行一次。\r\n"
-L"    问：视频会不会被移动或删除？\r\n"
-L"    答：不会。只改文件名，内容、位置、大小都不动。\r\n"
-L"    问：文件夹里混了字幕、封面、txt？\r\n"
-L"    答：只处理视频扩展名，其它文件原样不动。\r\n"
-L"    问：支持哪些视频格式？\r\n"
-L"    答：mp4 mkv mov avi wmv flv m4v ts webm mpg mpeg rmvb rm 3gp m2ts vob ogv divx asf f4v。\r\n"
-L"    问：统计总时长里说有几个文件读不到时长？\r\n"
-L"    答：那几个格式系统没有解压器（多是 flv、rmvb），弹窗里已经列出来了，改名不受影响。\r\n"
-L"    问：执行改名弹窗说「文件正被其他程序占用」？\r\n"
-L"    答：那个文件正被播放器、网盘同步或杀毒扫描占用，关掉占用它的程序再点一次即可。\r\n"
-L"    已经改过的会自动回滚，不会只改一半。\r\n";
+static int g_tutorialPage = 0;
+static const wchar_t* kTutorialTitles[] = {
+    L"批量改名 · 使用教程", L"剧集统计 · 使用教程",
+    L"压缩包改名 · 使用教程", L"剪映草稿生成 · 使用教程"
+};
+static const wchar_t* kTutorialTexts[] = {
+    L"批量改名 · 使用教程\r\n\r\n"
+    L"1. 选择视频文件夹，也可以把文件夹拖进窗口。默认只处理当前目录；勾选「包含子文件夹」后会递归处理。\r\n\r\n"
+    L"2. 填写剧名，或点「识别剧名」从路径中自动识别。选择类型标签；选自定义时，在输入框填写标签（不需要输入 #）。\r\n\r\n"
+    L"3. 设置起始序号、补零位数、排序方式和冒号处理。默认按识别到的集数排序；也可以选文件名自然排序或修改时间。\r\n\r\n"
+    L"4. 查看预览列表，确认新旧文件名对应正确后点「执行改名」。操作只改文件名，不移动视频。\r\n\r\n"
+    L"勾选「沿用原集数」会保留断档；集数重复、目标已存在或名称不合法时，程序会阻止执行。改名后可点「撤销上次」恢复。\r\n\r\n"
+    L"「统计总时长」按当前目录和子文件夹设置汇总视频时长；无法读取的格式会单独列出，不影响改名。",
 
+    L"剧集统计 · 使用教程\r\n\r\n"
+    L"1. 分别选择「原剧文件夹」和「海外文件夹」。两个目录相同时只扫描一次。\r\n\r\n"
+    L"2. 选目录后程序会尝试识别剧名；也可以点旁边的「智能识别」。识别结果可手动修改。\r\n\r\n"
+    L"3. 点「统计信息」，程序会计算两边的视频集数和总时长，并按海外剧时长生成「特殊情况」说明。\r\n\r\n"
+    L"4. 检查下方报送文案。剧名、集数、时长或特殊情况有需要时可以编辑，文案会同步更新；点「复制文案」即可粘贴使用。",
+
+    L"压缩包改名 · 使用教程\r\n\r\n"
+    L"1. 选择放有压缩包的文件夹。默认只扫描当前目录；勾选「包含子文件夹」会递归扫描。\r\n\r\n"
+    L"2. 点「扫描集数」查看压缩包内容。程序根据包内视频文件名识别集数；只识别到一个集数的压缩包才会生成数字文件名，例如 5.zip。\r\n\r\n"
+    L"3. 检查预览结果，再点「执行改名」。多集、未识别到集数、目标重名以及分卷压缩包会被跳过或拦截。\r\n\r\n"
+    L"ZIP 由程序读取；RAR、7Z、TAR 使用 Windows 自带的 tar.exe。改名后可点「撤销上次」恢复。",
+
+    L"剪映草稿生成 · 使用教程\r\n\r\n"
+    L"1. 选择「素材目录」和「输出目录」。参考草稿模板已内置在程序里，不需要另外选择。素材文件不会被移动或复制。\r\n\r\n"
+    L"2. 选择分组方式：\r\n"
+    L"   · 每个子文件夹一条时间线：每个一级子文件夹为一组，组内视频按文件名自然排序；\r\n"
+    L"   · 按文件名正则分组：第 1 个捕获组作为时间线名称；\r\n"
+    L"   · 整个目录一条时间线：所选目录下的所有视频放在一条时间线上。\r\n\r\n"
+    L"3. 点「预览分组」检查时间线名称、片段数量和视频顺序。每条时间线只有一条视频轨，片段依次首尾相接。\r\n\r\n"
+    L"4. 设置每个草稿的时间线数量（默认 50），点「生成剪映草稿」。超过数量时程序会拆分为多个草稿；同名输出已存在时会停止，避免覆盖。\r\n\r\n"
+    L"程序不预制封面图。生成后在剪映中打开输出目录里的草稿即可；草稿引用原素材路径，因此之后不要移动或删除这些视频。"
+};
 static HWND g_hTutWnd = nullptr;
 static HWND g_hTutEdit = nullptr;
 static HWND g_hTutBtn = nullptr;
@@ -1252,7 +1767,7 @@ static HWND g_hTutBtn = nullptr;
 static LRESULT CALLBACK TutProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
-        g_hTutEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", kTutorialText,
+        g_hTutEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", kTutorialTexts[g_tutorialPage],
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
             0, 0, 0, 0, hwnd, (HMENU)IDC_HELP_TEXT, g_hInst, nullptr);
         g_hTutBtn = CreateWindowExW(0, L"BUTTON", L"知道了",
@@ -1286,7 +1801,10 @@ static LRESULT CALLBACK TutProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 static void ShowTutorial(HWND owner) {
+    g_tutorialPage = g_page;
     if (g_hTutWnd && IsWindow(g_hTutWnd)) {
+        SetWindowTextW(g_hTutWnd, kTutorialTitles[g_tutorialPage]);
+        SetWindowTextW(g_hTutEdit, kTutorialTexts[g_tutorialPage]);
         SetForegroundWindow(g_hTutWnd);
         return;
     }
@@ -1313,7 +1831,7 @@ static void ShowTutorial(HWND owner) {
     if (y < 0) y = 0;
 
     g_hTutWnd = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_TOOLWINDOW,
-        L"RenamerTutorialWnd", L"使用教程 · 短剧视频批量更名工具",
+        L"RenamerTutorialWnd", kTutorialTitles[g_tutorialPage],
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_VISIBLE,
         x, y, w, h, owner, nullptr, g_hInst, nullptr);
     if (g_hTutWnd) {
@@ -1329,7 +1847,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         std::unique_ptr<MediaProgressMessage> progress((MediaProgressMessage*)lp);
         if (progress && g_mediaTaskActive) {
             std::wstring status = g_mediaTaskKind == MediaTaskKind::Duration
-                ? L"统计时长中… " : L"统计剧集信息中… ";
+                ? L"统计时长中… " : g_mediaTaskKind == MediaTaskKind::DramaStats
+                ? L"统计剧集信息中… " : g_mediaTaskKind == MediaTaskKind::ArchiveScan
+                ? L"读取压缩包中… " : L"生成剪映草稿中… ";
             if (!progress->label.empty()) status += progress->label + L" ";
             status += std::to_wstring(progress->current) + L" / " + std::to_wstring(progress->total);
             SetStatus(status);
@@ -1403,7 +1923,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
             0,0,0,0, hwnd, (HMENU)IDC_CHECK_KEEPEP, g_hInst, nullptr);
 
-        g_hHelp = CreateWindowExW(0, L"BUTTON", L"使用教程",
+        g_hHelp = CreateWindowExW(0, L"BUTTON", L"本页教程",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             0,0,0,0, hwnd, (HMENU)IDC_BTN_HELP, g_hInst, nullptr);
 
@@ -1465,13 +1985,76 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_stReport = mkEdit(IDC_ST_REPORT, L"",
             WS_CHILD | WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL);
 
+        DWORD arEdit = WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL;
+        g_arFolder = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", arEdit,
+            0,0,0,0, hwnd, (HMENU)IDC_AR_FOLDER, g_hInst, nullptr);
+        g_arBrowse = mkBtn(IDC_AR_BROWSE, L"浏览...", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON);
+        g_arRecursive = mkBtn(IDC_AR_RECURSIVE, L"包含子文件夹",
+            WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX);
+        g_arHint = CreateWindowExW(0, L"STATIC",
+            L"仅改名为纯数字；每个压缩包需识别出一个集数。ZIP 原生读取，RAR/7Z/TAR 使用系统 tar.exe。",
+            WS_CHILD | SS_LEFT | SS_ENDELLIPSIS,
+            0,0,0,0, hwnd, nullptr, g_hInst, nullptr);
+        g_arScan = mkBtn(IDC_AR_SCAN, L"扫描集数", WS_CHILD | WS_TABSTOP | BS_OWNERDRAW);
+        g_arRename = mkBtn(IDC_AR_RENAME, L"执行改名", WS_CHILD | WS_TABSTOP | BS_OWNERDRAW);
+        g_arUndo = mkBtn(IDC_AR_UNDO, L"撤销上次", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON);
+        g_arList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+            WS_CHILD | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
+            0,0,0,0, hwnd, (HMENU)IDC_AR_LIST, g_hInst, nullptr);
+        ListView_SetExtendedListViewStyle(g_arList,
+            LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES | LVS_EX_LABELTIP);
+        SetupArchiveListColumns();
+
+        DWORD jyEdit = WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL;
+        DWORD jyButton = WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON;
+        g_jySource = mkEdit(IDC_JY_SOURCE, L"", jyEdit);
+        g_jySourceBrowse = mkBtn(IDC_JY_SOURCE_BROWSE, L"浏览...", jyButton);
+        g_jyOutput = mkEdit(IDC_JY_OUTPUT, L"", jyEdit);
+        g_jyOutputBrowse = mkBtn(IDC_JY_OUTPUT_BROWSE, L"浏览...", jyButton);
+        g_jyMode = CreateWindowExW(0, L"COMBOBOX", L"",
+            WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+            0,0,0,0, hwnd, (HMENU)IDC_JY_MODE, g_hInst, nullptr);
+        SendMessageW(g_jyMode, CB_ADDSTRING, 0, (LPARAM)L"每个子文件夹一条时间线");
+        SendMessageW(g_jyMode, CB_ADDSTRING, 0, (LPARAM)L"按文件名正则分组");
+        SendMessageW(g_jyMode, CB_ADDSTRING, 0, (LPARAM)L"整个目录一条时间线");
+        SendMessageW(g_jyMode, CB_SETCURSEL, 0, 0);
+        g_jyLimit = mkEdit(IDC_JY_LIMIT, L"50", jyEdit | ES_NUMBER);
+        g_jyRegex = mkEdit(IDC_JY_REGEX,
+            L"^(.*?)(?:[_ .-]*(?:集数|第|EP|E)?0*\\d+(?:集|话|話)?)(?:[_ .-].*)?$", jyEdit);
+        g_jyHint = CreateWindowExW(0, L"STATIC",
+            L"仅在“按文件名正则分组”时使用；第 1 个捕获组作为时间线名称。",
+            WS_CHILD | SS_LEFT | SS_ENDELLIPSIS, 0,0,0,0, hwnd, (HMENU)IDC_JY_HINT, g_hInst, nullptr);
+        g_jyList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+            WS_CHILD | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
+            0,0,0,0, hwnd, (HMENU)IDC_JY_LIST, g_hInst, nullptr);
+        ListView_SetExtendedListViewStyle(g_jyList,
+            LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES | LVS_EX_LABELTIP);
+        struct { const wchar_t* title; int width; } jyColumns[] = {
+            { L"时间线名称", 190 }, { L"片段数", 82 }, { L"视频顺序（自然排序）", 650 }
+        };
+        for (int i = 0; i < 3; ++i) {
+            LVCOLUMNW column{};
+            column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+            column.pszText = const_cast<LPWSTR>(jyColumns[i].title);
+            column.cx = S(jyColumns[i].width);
+            column.iSubItem = i;
+            ListView_InsertColumn(g_jyList, i, &column);
+        }
+        g_jyPreview = mkBtn(IDC_JY_PREVIEW, L"预览分组", jyButton);
+        g_jyGenerate = mkBtn(IDC_JY_GENERATE, L"生成剪映草稿", jyButton);
+
         HWND all[] = { g_hFolder, g_hBrowse, g_hTitle, g_hStart, g_hPad, g_hSub,
                        g_hSort, g_hTag, g_hCustom, g_hColon, g_hList, g_hPreview,
                        g_hRename, g_hUndo, g_hTitles, g_hOpen, g_hGuess, g_hAuto,
                        g_hKeepEp, g_hHelp, g_hDuration,
                        g_stF1, g_stB1, g_stG1, g_stF2, g_stB2, g_stG2, g_stT1, g_stEp1,
                        g_stDur1, g_stT2, g_stEp2, g_stDur2, g_stSpecial, g_stScan,
-                       g_stCopy, g_stReport };
+                       g_stCopy, g_stReport,
+                       g_arFolder, g_arBrowse, g_arRecursive, g_arHint, g_arScan,
+                       g_arRename, g_arUndo, g_arList,
+                       g_jySource, g_jySourceBrowse, g_jyOutput, g_jyOutputBrowse,
+                       g_jyMode, g_jyLimit, g_jyRegex,
+                       g_jyHint, g_jyList, g_jyPreview, g_jyGenerate };
         for (HWND h : all) SendMessageW(h, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
         SendMessageW(g_hStatus, WM_SETFONT, (WPARAM)g_fontSub, TRUE);
 
@@ -1518,14 +2101,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         DrawHeader(hdc, rc);
         DrawTabs(hdc, rc);
         if (g_page == 0) DrawLabels(hdc, hwnd);
-        else             DrawStatsLabels(hdc, hwnd);
+        else if (g_page == 1) DrawStatsLabels(hdc, hwnd);
+        else if (g_page == 2) DrawArchiveLabels(hdc, hwnd);
+        else DrawDraftLabels(hdc, hwnd);
         EndPaint(hwnd, &ps);
         return 0;
     }
 
     case WM_LBUTTONDOWN: {
         POINT pt = { (int)(short)LOWORD(lp), (int)(short)HIWORD(lp) };
-        for (int i = 0; i < 2; ++i) {
+        for (int i = 0; i < 4; ++i) {
             RECT r = TabRect(i);
             if (PtInRect(&r, pt)) {
                 if (g_page != i) ShowPage(hwnd, i);
@@ -1540,13 +2125,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         HWND c = (HWND)lp;
         SetBkMode(hdc, TRANSPARENT);
         if (c == g_hStatus) SetTextColor(hdc, RGB(100, 116, 139));
-        else if (c == g_hSub) SetTextColor(hdc, RGB(51, 65, 85));
+        else if (c == g_hSub || c == g_arHint) SetTextColor(hdc, RGB(100, 116, 139));
         return (LRESULT)g_brBack;
     }
 
     case WM_DRAWITEM: {
         DRAWITEMSTRUCT* di = (DRAWITEMSTRUCT*)lp;
-        if (di->CtlID == IDC_BTN_RENAME || di->CtlID == IDC_ST_BTN_SCAN) {
+        if (di->CtlID == IDC_BTN_RENAME || di->CtlID == IDC_ST_BTN_SCAN ||
+            di->CtlID == IDC_AR_SCAN || di->CtlID == IDC_AR_RENAME) {
             bool pressed = (di->itemState & ODS_SELECTED) != 0;
             COLORREF bg = pressed ? RGB(29, 78, 216) : RGB(37, 99, 235);
             HBRUSH br = CreateSolidBrush(bg);
@@ -1564,9 +2150,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SetTextColor(di->hDC, RGB(255, 255, 255));
             HFONT oldF = (HFONT)SelectObject(di->hDC, g_fontBtn);
             RECT r = di->rcItem;
-            DrawTextW(di->hDC,
-                      di->CtlID == IDC_BTN_RENAME ? L"执行改名" : L"统计信息",
-                      -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            const wchar_t* text = di->CtlID == IDC_BTN_RENAME || di->CtlID == IDC_AR_RENAME
+                ? L"执行改名" : di->CtlID == IDC_AR_SCAN ? L"扫描集数" : L"统计信息";
+            DrawTextW(di->hDC, text, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             SelectObject(di->hDC, oldF);
             return TRUE;
         }
@@ -1586,19 +2172,28 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         DragFinish(hd);
         if (!folder.empty()) {
-            g_suppress = true;
-            SetWindowTextW(g_hFolder, folder.c_str());
-            g_suppress = false;
-            if (Trim(GetText(g_hTitle)).empty() || g_titleAuto) {
-                std::wstring t = GuessDramaNamesFromFolder(folder).title;
-                if (!t.empty()) {
-                    g_suppress = true;
-                    SetWindowTextW(g_hTitle, t.c_str());
-                    g_suppress = false;
-                    g_titleAuto = true;
+            if (g_page == 2) {
+                SetWindowTextW(g_arFolder, folder.c_str());
+                ClearArchivePreview();
+                SetStatus(L"已选择目录，点击「扫描集数」查看压缩包内容");
+            } else if (g_page == 3) {
+                SetWindowTextW(g_jySource, folder.c_str());
+                ClearDraftPreview();
+            } else {
+                g_suppress = true;
+                SetWindowTextW(g_hFolder, folder.c_str());
+                g_suppress = false;
+                if (Trim(GetText(g_hTitle)).empty() || g_titleAuto) {
+                    std::wstring t = GuessDramaNamesFromFolder(folder).title;
+                    if (!t.empty()) {
+                        g_suppress = true;
+                        SetWindowTextW(g_hTitle, t.c_str());
+                        g_suppress = false;
+                        g_titleAuto = true;
+                    }
                 }
+                DoAutoRefresh();
             }
-            DoAutoRefresh();
         }
         return 0;
     }
@@ -1607,6 +2202,58 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int id = LOWORD(wp);
         int code = HIWORD(wp);
         switch (id) {
+        case IDC_JY_SOURCE_BROWSE:
+        case IDC_JY_OUTPUT_BROWSE: {
+            std::wstring folder;
+            const wchar_t* title = id == IDC_JY_SOURCE_BROWSE ? L"选择待剪辑视频目录" :
+                                   L"选择草稿输出目录";
+            if (PickFolder(folder, title)) {
+                HWND edit = id == IDC_JY_SOURCE_BROWSE ? g_jySource :
+                            g_jyOutput;
+                SetWindowTextW(edit, folder.c_str());
+                ClearDraftPreview();
+            }
+            return 0;
+        }
+        case IDC_JY_SOURCE:
+        case IDC_JY_OUTPUT:
+        case IDC_JY_LIMIT:
+        case IDC_JY_REGEX:
+            if (code == EN_CHANGE) ClearDraftPreview();
+            return 0;
+        case IDC_JY_MODE:
+            if (code == CBN_SELCHANGE) ClearDraftPreview();
+            return 0;
+        case IDC_JY_PREVIEW:
+            DoDraftPreview();
+            return 0;
+        case IDC_JY_GENERATE:
+            DoGenerateDrafts();
+            return 0;
+        case IDC_AR_BROWSE: {
+            std::wstring folder;
+            if (PickFolder(folder, L"选择压缩包所在文件夹")) {
+                SetWindowTextW(g_arFolder, folder.c_str());
+                ClearArchivePreview();
+                SetStatus(L"已选择目录，点击「扫描集数」查看压缩包内容");
+            }
+            return 0;
+        }
+        case IDC_AR_FOLDER:
+            if (code == EN_CHANGE) ClearArchivePreview();
+            return 0;
+        case IDC_AR_RECURSIVE:
+            if (code == BN_CLICKED) ClearArchivePreview();
+            return 0;
+        case IDC_AR_SCAN:
+            DoScanArchives();
+            return 0;
+        case IDC_AR_RENAME:
+            DoRenameArchives();
+            return 0;
+        case IDC_AR_UNDO:
+            DoUndoArchives();
+            return 0;
         case IDC_BTN_BROWSE: {
             std::wstring f;
             if (PickFolder(f)) {
@@ -2161,6 +2808,10 @@ static int RunSelfTest() {
     CHECK(ComposeReport(L"", L"", L"", L"", L"", L"", L"") == L"", L"空字段时文案为空");
     CHECK(ComposeReport(L"剧", L"10", L"", L"", L"", L"", L"") == L"原剧:\r\n剧\r\n集数: 10",
           L"只有原剧信息");
+
+    std::wstring draftSelfTestError;
+    const bool draftSelfTestOk = jianying_draft::SelfTest(draftSelfTestError);
+    CHECK(draftSelfTestOk, draftSelfTestOk ? L"剪映草稿分组自检" : L"剪映草稿分组自检：" + draftSelfTestError);
 
     LOGW(L"\n=== 结果：%ls（失败 %d 项）===\n",
         g_fail == 0 ? L"全部通过" : L"存在失败", g_fail);

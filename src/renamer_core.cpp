@@ -69,8 +69,12 @@ bool IsBadNumber(const std::wstring& s) {
 
 EpResult ParseEpisode(const std::wstring& raw) {
     std::wstring name = raw;
+    size_t slash = name.find_last_of(L"/\\");
+    if (slash != std::wstring::npos) name = name.substr(slash + 1);
     size_t dot = name.find_last_of(L'.');
     if (dot != std::wstring::npos && dot > 0) name = name.substr(0, dot);
+    size_t storyboard = name.find(L"分镜");
+    if (storyboard != std::wstring::npos) name.resize(storyboard);
 
     EpResult best;
 
@@ -82,6 +86,9 @@ EpResult ParseEpisode(const std::wstring& raw) {
         std::regex_constants::icase);
     static const std::wregex reChineseShort(
         L"(\\d{1,4})\\s*[集话話]",
+        std::regex_constants::icase);
+    static const std::wregex reEpisodeNumber(
+        L"集数\\s*(\\d{1,4})",
         std::regex_constants::icase);
     static const std::wregex reEp(
         L"(?:^|[^A-Za-z])[Ee][Pp][\\s._-]*(\\d{1,4})",
@@ -122,6 +129,7 @@ EpResult ParseEpisode(const std::wstring& raw) {
     } catch (...) {}
 
     tryPat(reChinese,      130, false);
+    tryPat(reEpisodeNumber, 140, false);
     tryPat(reChineseShort, 125, false);
     tryPat(reEp,           110, true);
     tryPat(reBracket,        80, true);

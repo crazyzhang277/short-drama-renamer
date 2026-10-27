@@ -1,5 +1,28 @@
 #include <windows.h>
+#include "resource.h"
 
 1 RT_MANIFEST "app.manifest"
 
 1 ICON "app.ico"
+
+IDR_JY_PROJECT RCDATA "jianying_template\\Timelines\\project.json"
+IDR_JY_CONTENT RCDATA "jianying_template\\Timelines\\FB12D1C8-4354-4120-B8B0-BF1A5AE3A979\\draft_content.json"
+IDR_JY_ROOT_EDITING RCDATA "jianying_template\\attachment_editing.json"
+IDR_JY_ROOT_PC_COMMON RCDATA "jianying_template\\attachment_pc_common.json"
+IDR_JY_ROOT_ACTION_SCENE RCDATA "jianying_template\\common_attachment\\attachment_action_scene.json"
+IDR_JY_ROOT_ID_MAPPING RCDATA "jianying_template\\common_attachment\\attachment_id_mapping.json"
+IDR_JY_ROOT_PC_TIMELINE RCDATA "jianying_template\\common_attachment\\attachment_pc_timeline.json"
+IDR_JY_ROOT_SCRIPT_VIDEO RCDATA "jianying_template\\common_attachment\\attachment_script_video.json"
+IDR_JY_ROOT_COOPERATE_CREATE RCDATA "jianying_template\\common_attachment\\coperate_create.json"
+IDR_JY_TIMELINE_EDITING RCDATA "jianying_template\\Timelines\\FB12D1C8-4354-4120-B8B0-BF1A5AE3A979\\attachment_editing.json"
+IDR_JY_TIMELINE_PC_COMMON RCDATA "jianying_template\\Timelines\\FB12D1C8-4354-4120-B8B0-BF1A5AE3A979\\attachment_pc_common.json"
+IDR_JY_TIMELINE_ACTION_SCENE RCDATA "jianying_template\\Timelines\\FB12D1C8-4354-4120-B8B0-BF1A5AE3A979\\common_attachment\\attachment_action_scene.json"
+IDR_JY_TIMELINE_ID_MAPPING RCDATA "jianying_template\\Timelines\\FB12D1C8-4354-4120-B8B0-BF1A5AE3A979\\common_attachment\\attachment_id_mapping.json"
+IDR_JY_TIMELINE_PC_TIMELINE RCDATA "jianying_template\\Timelines\\FB12D1C8-4354-4120-B8B0-BF1A5AE3A979\\common_attachment\\attachment_pc_timeline.json"
+IDR_JY_TIMELINE_SCRIPT_VIDEO RCDATA "jianying_template\\Timelines\\FB12D1C8-4354-4120-B8B0-BF1A5AE3A979\\common_attachment\\attachment_script_video.json"
+IDR_JY_DRAFT_SETTINGS RCDATA "jianying_template\\draft_settings"
+IDR_JY_DRAFT_EXTRA RCDATA "jianying_template\\draft.extra"
+IDR_JY_KEY_VALUE RCDATA "jianying_template\\key_value.json"
+IDR_JY_PERFORMANCE RCDATA "jianying_template\\performance_opt_info.json"
+IDR_JY_AGENCY_CONFIG RCDATA "jianying_template\\draft_agency_config.json"
+IDR_JY_BIZ_CONFIG RCDATA "jianying_template\\draft_biz_config.json"
