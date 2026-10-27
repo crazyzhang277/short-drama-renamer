@@ -279,7 +279,7 @@ src/app.ico         图标
 ## 十、目录说明
 
 ```
-短剧更名工具.exe      主程序（双击运行）
+短剧更名工具.exe      build.bat 编译后生成的程序（不随源码仓库提交）
 build.bat             编译脚本
 install-toolchain.ps1 安装 C++ 编译环境
 README.md             本文档
@@ -288,5 +288,4 @@ shot-stats.png        剧集统计页截图
 shot-duration-dialog.png  统计总时长弹窗截图
 src\                  源码
 tools\                开发期用的自动化测试脚本（截图 / 布局检查 / 端到端测试）
-legacy-node\          最早的 Node.js 命令行版本（已被本版本取代，留作参考）
 ```

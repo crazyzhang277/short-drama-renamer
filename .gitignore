@@ -2,7 +2,16 @@
 src/renamer.exe
 src/*.o
 src/app.res
-src/selftest.log
+/短剧更名工具.exe
+/dist/
+
+# 自检与可再生成截图
+selftest.log
+/shot-duration.png
+/shot-gap-off.png
+/shot-gap-on.png
+/shot-tutorial.png
+.codegraph/
 
 # 运行时生成
 settings.ini

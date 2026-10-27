@@ -1,6 +1,6 @@
 #requires -Version 7.0
 <#
-  打一个 tag + Release，并把 dist 里的单文件 exe 当附件传上去。
+  打一个 tag + Release，并把 build.bat 生成的单文件 exe 当附件传上去。
   用法：
     $env:GITHUB_TOKEN = 'ghp_xxx'
     pwsh -NoProfile -File tools\gh-release.ps1 -Tag v1.1.0
@@ -10,7 +10,7 @@ param(
     [string]$Repo    = 'short-drama-renamer',
     [string]$Tag     = 'v1.1.0',
     [string]$Root    = (Split-Path -Parent $PSScriptRoot),
-    [string]$Asset   = 'dist\短剧更名工具.exe',
+    [string]$Asset   = '短剧更名工具.exe',
     [string]$AssetName = 'short-drama-renamer.exe',
     [string]$Notes   = '新增「统计总时长」：选中文件夹一次算出所有视频的合计时长。'
 )
