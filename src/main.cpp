@@ -99,6 +99,8 @@ enum {
     IDC_JY_OUTPUT_BROWSE,
     IDC_JY_MODE,
     IDC_JY_LIMIT,
+    IDC_JY_START,
+    IDC_JY_NUMBER,
     IDC_JY_REGEX,
     IDC_JY_HINT,
     IDC_JY_LIST,
@@ -121,7 +123,7 @@ static HWND  g_stF1, g_stB1, g_stG1, g_stF2, g_stB2, g_stG2, g_stT1, g_stEp1, g_
              g_stT2, g_stEp2, g_stDur2, g_stSpecial, g_stScan, g_stCopy, g_stReport;
 static HWND  g_arFolder, g_arBrowse, g_arRecursive, g_arHint, g_arScan, g_arRename, g_arUndo, g_arList;
 static HWND  g_jySource, g_jySourceBrowse, g_jyOutput, g_jyOutputBrowse,
-             g_jyMode, g_jyLimit, g_jyRegex,
+             g_jyMode, g_jyLimit, g_jyNumber, g_jyStart, g_jyRegex,
              g_jyHint, g_jyList, g_jyPreview, g_jyGenerate;
 static bool g_stT1Auto = false, g_stT2Auto = false;
 static int   g_page = 0;          // 0 = 批量改名，1 = 剧集统计，2 = 压缩包改名，3 = 剪映草稿
@@ -244,8 +246,8 @@ static void SetMediaControlsBusy(bool busy, MediaTaskKind kind) {
         } else if (kind == MediaTaskKind::JianyingDraft) {
             controls.insert(controls.end(), { g_jySource, g_jySourceBrowse,
                                               g_jyOutput, g_jyOutputBrowse,
-                                              g_jyMode, g_jyLimit, g_jyRegex, g_jyList,
-                                              g_jyPreview, g_jyGenerate });
+                                              g_jyMode, g_jyLimit, g_jyNumber, g_jyStart, g_jyRegex,
+                                              g_jyList, g_jyPreview, g_jyGenerate });
         }
         for (HWND control : controls) {
             if (!control || !IsWindow(control)) continue;
@@ -1158,11 +1160,27 @@ static bool ReadDraftOptions(jianying_draft::BuildOptions& options,
     return true;
 }
 
+static bool ReadTimelineStart(long& start, std::wstring& error) {
+    start = 0;   // 未勾选「时间线按序号命名」时保持识别出的名称
+    if (SendMessageW(g_jyNumber, BM_GETCHECK, 0, 0) != BST_CHECKED) return true;
+    const std::wstring text = Trim(GetText(g_jyStart));
+    if (text.empty()) { start = 1; return true; }
+    wchar_t* end = nullptr;
+    const unsigned long value = wcstoul(text.c_str(), &end, 10);
+    if (!end || *end != L'\0' || value < 1 || value > 99999) {
+        error = L"时间线起始序号需填写 1 到 99999 之间的整数。";
+        return false;
+    }
+    start = (long)value;
+    return true;
+}
+
 static void DoDraftPreview() {
     jianying_draft::BuildOptions options;
     jianying_draft::GroupMode mode;
     std::wstring error;
-    if (!ReadDraftOptions(options, mode, error)) {
+    long start = 0;
+    if (!ReadDraftOptions(options, mode, error) || !ReadTimelineStart(start, error)) {
         ClearDraftPreview(false);
         SetStatus(error);
         MessageBoxW(g_hMain, error.c_str(), L"剪映草稿预览", MB_ICONWARNING);
@@ -1175,6 +1193,7 @@ static void DoDraftPreview() {
         MessageBoxW(g_hMain, error.c_str(), L"剪映草稿预览", MB_ICONWARNING);
         return;
     }
+    if (start > 0) jianying_draft::NumberGroups(groups, start);
     g_jyGroups = std::move(groups);
     g_jyPreviewed = true;
     ListView_DeleteAllItems(g_jyList);
@@ -1290,6 +1309,8 @@ static void SaveSettings() {
     put("jySource", Trim(GetText(g_jySource)));
     put("jyOutput", Trim(GetText(g_jyOutput)));
     put("jyLimit", Trim(GetText(g_jyLimit)));
+    put("jyStart", Trim(GetText(g_jyStart)));
+    put("jyNumber", SendMessageW(g_jyNumber, BM_GETCHECK, 0, 0) == BST_CHECKED ? L"1" : L"0");
     put("jyRegex", Trim(GetText(g_jyRegex)));
 
     wchar_t b[16] = {0};
@@ -1345,6 +1366,12 @@ static void LoadSettings() {
         else if (k == L"jySource") SetWindowTextW(g_jySource, v.c_str());
         else if (k == L"jyOutput") SetWindowTextW(g_jyOutput, v.c_str());
         else if (k == L"jyLimit") SetWindowTextW(g_jyLimit, v.c_str());
+        else if (k == L"jyStart") SetWindowTextW(g_jyStart, v.c_str());
+        else if (k == L"jyNumber") {
+            const bool on = v == L"1";
+            SendMessageW(g_jyNumber, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
+            EnableWindow(g_jyStart, on);
+        }
         else if (k == L"jyRegex") SetWindowTextW(g_jyRegex, v.c_str());
         else if (k == L"jyMode") SendMessageW(g_jyMode, CB_SETCURSEL, _wtoi(v.c_str()), 0);
     }
@@ -1443,6 +1470,8 @@ static void LayoutDrafts(int W, int H) {
     y += rowH + rowGap;
     MoveWindow(g_jyMode, bx, y, S(250), rowH, TRUE);
     MoveWindow(g_jyLimit, bx + S(405), y, S(72), rowH, TRUE);
+    MoveWindow(g_jyNumber, bx + S(497), y, S(150), rowH, TRUE);
+    MoveWindow(g_jyStart, bx + S(655), y, S(56), rowH, TRUE);
     y += rowH + rowGap;
     MoveWindow(g_jyRegex, bx, y, right - bx, rowH, TRUE);
     MoveWindow(g_jyHint, bx, y + rowH + S(2), right - bx, S(18), TRUE);
@@ -1677,11 +1706,14 @@ static void DrawDraftLabels(HDC hdc, HWND hwnd) {
     labelAt(g_jyOutput, L"输出目录");
     labelAt(g_jyMode, L"分组方式");
     labelAt(g_jyRegex, L"文件名正则");
-    RECT limit{};
-    GetWindowRect(g_jyLimit, &limit);
-    MapWindowPoints(HWND_DESKTOP, hwnd, (POINT*)&limit, 2);
-    RECT limitLabel = { limit.left - S(104), limit.top, limit.left - S(8), limit.bottom };
-    DrawTextW(hdc, L"每稿时间线", -1, &limitLabel, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+    auto labelWide = [&](HWND control, const wchar_t* text) {
+        RECT r{};
+        GetWindowRect(control, &r);
+        MapWindowPoints(HWND_DESKTOP, hwnd, (POINT*)&r, 2);
+        RECT label = { r.left - S(104), r.top, r.left - S(8), r.bottom };
+        DrawTextW(hdc, text, -1, &label, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+    };
+    labelWide(g_jyLimit, L"每稿时间线");
     SelectObject(hdc, old);
 }
 
@@ -1698,7 +1730,7 @@ static void ShowPage(HWND hwnd, int page) {
     HWND archiveCtl[] = { g_arFolder, g_arBrowse, g_arRecursive, g_arHint,
                           g_arScan, g_arRename, g_arUndo, g_arList };
     HWND draftCtl[] = { g_jySource, g_jySourceBrowse, g_jyOutput, g_jyOutputBrowse,
-                        g_jyMode, g_jyLimit, g_jyRegex,
+                        g_jyMode, g_jyLimit, g_jyNumber, g_jyStart, g_jyRegex,
                         g_jyHint, g_jyList, g_jyPreview, g_jyGenerate };
     for (HWND h : renameCtl) ShowWindow(h, page == 0 ? SW_SHOW : SW_HIDE);
     for (HWND h : statsCtl)  ShowWindow(h, page == 1 ? SW_SHOW : SW_HIDE);
@@ -1757,7 +1789,7 @@ static const wchar_t* kTutorialTexts[] = {
     L"   · 按文件名正则分组：第 1 个捕获组作为时间线名称；\r\n"
     L"   · 整个目录一条时间线：所选目录下的所有视频放在一条时间线上。\r\n\r\n"
     L"3. 点「预览分组」检查时间线名称、片段数量和视频顺序。每条时间线只有一条视频轨，片段依次首尾相接。\r\n\r\n"
-    L"4. 设置每个草稿的时间线数量（默认 50），点「生成剪映草稿」。超过数量时程序会拆分为多个草稿；同名输出已存在时会停止，避免覆盖。\r\n\r\n"
+    L"4. 设置每个草稿的时间线数量（默认 50）。需要时勾选「时间线按序号命名」，时间线名称会改成从「起始序号」（默认 1）开始的连续数字（1、2、3…）；不勾选则保留识别出的名称。点「生成剪映草稿」。超过数量时程序会拆分为多个草稿；同名输出已存在时会停止，避免覆盖。\r\n\r\n"
     L"程序不预制封面图。生成后在剪映中打开输出目录里的草稿即可；草稿引用原素材路径，因此之后不要移动或删除这些视频。"
 };
 static HWND g_hTutWnd = nullptr;
@@ -2019,10 +2051,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SendMessageW(g_jyMode, CB_ADDSTRING, 0, (LPARAM)L"整个目录一条时间线");
         SendMessageW(g_jyMode, CB_SETCURSEL, 0, 0);
         g_jyLimit = mkEdit(IDC_JY_LIMIT, L"50", jyEdit | ES_NUMBER);
+        g_jyNumber = mkBtn(IDC_JY_NUMBER, L"时间线按序号命名",
+            WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX);
+        g_jyStart = mkEdit(IDC_JY_START, L"1", jyEdit | ES_NUMBER);
+        EnableWindow(g_jyStart, FALSE);   // 勾选后才编号
         g_jyRegex = mkEdit(IDC_JY_REGEX,
             L"^(.*?)(?:[_ .-]*(?:集数|第|EP|E)?0*\\d+(?:集|话|話)?)(?:[_ .-].*)?$", jyEdit);
         g_jyHint = CreateWindowExW(0, L"STATIC",
-            L"仅在“按文件名正则分组”时使用；第 1 个捕获组作为时间线名称。",
+            L"仅在“按文件名正则分组”时使用；第 1 个捕获组作为时间线名称。勾选「时间线按序号命名」后，时间线名称改为从起始序号开始的连续数字（1、2、3…）；不勾选则保留识别出的名称。",
             WS_CHILD | SS_LEFT | SS_ENDELLIPSIS, 0,0,0,0, hwnd, (HMENU)IDC_JY_HINT, g_hInst, nullptr);
         g_jyList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
             WS_CHILD | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
@@ -2053,7 +2089,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                        g_arFolder, g_arBrowse, g_arRecursive, g_arHint, g_arScan,
                        g_arRename, g_arUndo, g_arList,
                        g_jySource, g_jySourceBrowse, g_jyOutput, g_jyOutputBrowse,
-                       g_jyMode, g_jyLimit, g_jyRegex,
+                       g_jyMode, g_jyLimit, g_jyNumber, g_jyStart, g_jyRegex,
                        g_jyHint, g_jyList, g_jyPreview, g_jyGenerate };
         for (HWND h : all) SendMessageW(h, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
         SendMessageW(g_hStatus, WM_SETFONT, (WPARAM)g_fontSub, TRUE);
@@ -2218,11 +2254,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_JY_SOURCE:
         case IDC_JY_OUTPUT:
         case IDC_JY_LIMIT:
+        case IDC_JY_START:
         case IDC_JY_REGEX:
             if (code == EN_CHANGE) ClearDraftPreview();
             return 0;
         case IDC_JY_MODE:
             if (code == CBN_SELCHANGE) ClearDraftPreview();
+            return 0;
+        case IDC_JY_NUMBER:
+            if (code == BN_CLICKED) {
+                EnableWindow(g_jyStart,
+                    SendMessageW(g_jyNumber, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                ClearDraftPreview();
+            }
             return 0;
         case IDC_JY_PREVIEW:
             DoDraftPreview();

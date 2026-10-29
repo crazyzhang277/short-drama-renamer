@@ -567,6 +567,12 @@ bool ScanGroups(const fs::path& root, GroupMode mode, const std::wstring& filena
     }
 }
 
+void NumberGroups(std::vector<Group>& groups, long start) {
+    if (start <= 0) return;
+    for (size_t i = 0; i < groups.size(); ++i)
+        groups[i].name = std::to_wstring(start + static_cast<long>(i));
+}
+
 bool Generate(const BuildOptions& options, const std::vector<Group>& groups,
               const std::atomic<bool>& cancel, const Progress& progress,
               std::vector<fs::path>& outputs, std::wstring& error) {
@@ -783,6 +789,21 @@ bool SelfTest(std::wstring& error) {
             groups.size() != 1 || groups[0].clips.size() != 3) {
             fs::remove_all(root);
             error = L"单组模式自检失败。";
+            return false;
+        }
+        std::vector<Group> named(2);
+        named[0].name = L"Episode 2";
+        named[1].name = L"Episode 10";
+        NumberGroups(named, 9);
+        if (named[0].name != L"9" || named[1].name != L"10") {
+            fs::remove_all(root);
+            error = L"时间线序号自检失败。";
+            return false;
+        }
+        NumberGroups(named, 0);
+        if (named[0].name != L"9") {
+            fs::remove_all(root);
+            error = L"时间线序号（关闭时不改名）自检失败。";
             return false;
         }
         fs::remove_all(root);

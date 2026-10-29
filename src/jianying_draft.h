@@ -26,6 +26,8 @@ using Progress = std::function<void(size_t, size_t, const std::wstring&)>;
 bool ScanGroups(const renamer::fs::path& root, GroupMode mode,
                 const std::wstring& filenameRegex, std::vector<Group>& groups,
                 std::wstring& error);
+// 把时间线名称改成从 start 开始的连续数字（9、10、11…），不保留原名；start<=0 时不改动。
+void NumberGroups(std::vector<Group>& groups, long start);
 bool Generate(const BuildOptions& options, const std::vector<Group>& groups,
               const std::atomic<bool>& cancel, const Progress& progress,
               std::vector<renamer::fs::path>& outputs, std::wstring& error);
